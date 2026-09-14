@@ -511,16 +511,16 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               <div
                 key={orderKey}
                 onClick={() => onSelectOrder(order)}
-                className="bg-[#141419] hover:bg-[#181824] border border-[#232430] hover:border-[#383a4c] rounded-xl p-3 sm:p-4 shadow-sm transition-all cursor-pointer select-none group relative space-y-2.5"
+                className="bg-[#141419] hover:bg-[#181822] active:bg-[#1c1c28] border border-[#232430] hover:border-[#383a4c] rounded-xl p-3 sm:px-4 sm:py-3 shadow-xs transition-all cursor-pointer select-none group relative"
               >
-                {/* 1. Header Row: Order ID, Row #, Quick Edit Button, and Status Dropdown (Col J) */}
+                {/* Line 1: Order ID, Row #, Date, Tracking (K), Courier (L), Pen (Edit) Icon, and Status Dropdown (Col J) */}
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0 flex-1 flex-wrap">
-                    <span className="text-xs font-mono font-bold text-purple-400 shrink-0">
+                    <span className="text-xs font-mono font-bold text-gray-400 group-hover:text-purple-400 shrink-0">
                       {order.id.startsWith('#') ? order.id : `#${order.id}`}
                     </span>
                     {order.rowIndex && (
-                      <span className="text-[10px] text-gray-400 font-mono bg-[#1b1c24] px-1.5 py-0.5 rounded border border-[#262835] shrink-0">
+                      <span className="text-[10px] text-gray-500 font-mono bg-[#1b1c24] px-1.5 py-0.5 rounded border border-[#262835] shrink-0">
                         Row #{order.rowIndex}
                       </span>
                     )}
@@ -532,17 +532,40 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     )}
                   </div>
 
-                  {/* Actions on Top Right: Edit Button + Status Dropdown */}
+                  {/* Actions on Top Right: Tracking (K), Courier (L), Pen / Edit Icon + Status Dropdown (Col J) */}
                   <div className="flex items-center gap-1.5 shrink-0">
-                    {/* Quick Edit Button */}
+                    {/* Tracking Code Badge (Column K) */}
+                    {order.trackingCode && (
+                      <button
+                        type="button"
+                        onClick={(e) => handleCopyTracking(e, order.trackingCode!)}
+                        className="px-2 py-0.5 rounded bg-[#101b2e] hover:bg-[#16253f] border border-blue-800/40 text-cyan-300 font-mono text-[10px] flex items-center gap-1 cursor-pointer"
+                        title="ট্র্যাকিং কোড কপি করুন"
+                      >
+                        <span>K: {order.trackingCode}</span>
+                        {copiedTracking === order.trackingCode ? (
+                          <Check className="w-2.5 h-2.5 text-emerald-400" />
+                        ) : (
+                          <Copy className="w-2.5 h-2.5 text-gray-400" />
+                        )}
+                      </button>
+                    )}
+
+                    {/* Courier Status (Column L) */}
+                    {order.courierStatus && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-950/70 text-purple-300 border border-purple-800/40 font-mono shrink-0">
+                        L: {order.courierStatus}
+                      </span>
+                    )}
+
+                    {/* Quick Edit Pen Icon Button */}
                     <button
                       type="button"
                       onClick={(e) => openEditModal(e, order)}
-                      className="px-2 py-1 rounded-md bg-[#1e2230] hover:bg-[#282e42] text-gray-300 hover:text-white text-[11px] font-medium border border-[#2b334a] transition-all flex items-center gap-1 cursor-pointer"
-                      title="অর্ডার এডিট করুন (নাম, ফোন, ঠিকানা, মূল্য)"
+                      className="p-1.5 rounded-lg bg-[#1e2230] hover:bg-[#282e42] text-pink-400 hover:text-pink-300 border border-[#2b334a] transition-all flex items-center justify-center cursor-pointer"
+                      title="অর্ডার এডিট করুন (নাম, ফোন, ঠিকানা, কোয়ান্টিটি, ভ্যারিয়েন্ট)"
                     >
-                      <Edit3 className="w-3 h-3 text-pink-400" />
-                      <span className="hidden sm:inline">Edit</span>
+                      <Edit3 className="w-3.5 h-3.5" />
                     </button>
 
                     {/* Status Dropdown Button (Column J) */}
@@ -591,206 +614,19 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   </div>
                 </div>
 
-                {/* 2. Customer & Product Details */}
-                <div className="flex items-start justify-between gap-3 text-xs">
-                  <div className="space-y-0.5 min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-bold text-white tracking-tight">
-                        {order.customerName || 'গ্রাহকের নাম নেই'}
-                      </span>
-                      {order.customerPhone && (
-                        <a
-                          href={`tel:${order.customerPhone}`}
-                          onClick={(e) => e.stopPropagation()}
-                          className="text-[11px] font-mono text-cyan-400 hover:text-cyan-300 flex items-center gap-1 bg-[#102430] px-1.5 py-0.5 rounded border border-cyan-800/40"
-                          title="কল করুন"
-                        >
-                          <Phone className="w-2.5 h-2.5" />
-                          <span>{order.customerPhone}</span>
-                        </a>
-                      )}
-                    </div>
-
-                    {order.customerAddress && (
-                      <p className="text-[11px] text-gray-400 truncate flex items-center gap-1">
-                        <MapPin className="w-3 h-3 text-gray-500 shrink-0" />
-                        <span className="truncate">{order.customerAddress}</span>
-                      </p>
-                    )}
-
-                    <p className="text-[11px] text-gray-400">
-                      পণ্য: <strong className="text-gray-200">{order.product || 'Golden Watch Combo'}</strong>
-                    </p>
+                {/* Line 2: Product Name on Left, Price on Right */}
+                <div className="mt-1.5 flex items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-1.5 text-gray-300 font-medium flex-1 min-w-0 pr-2">
+                    <span className="truncate block text-gray-300">
+                      {order.product || 'Golden Watch Combo'}
+                    </span>
                   </div>
 
-                  {/* Price Display */}
-                  <div className="text-right shrink-0">
-                    <span className="text-sm sm:text-base font-bold font-mono text-emerald-400 tracking-tight">
+                  <div className="shrink-0 flex items-center gap-1.5">
+                    <span className="text-xs sm:text-sm font-bold font-mono text-emerald-400 tracking-tight">
                       {displayAmount}.00 BDT
                     </span>
-                    <div className="text-[10px] text-gray-500">ক্যাশ অন ডেলিভারি</div>
-                  </div>
-                </div>
-
-                {/* 3. Interactive Control Row: Variant (H), Source (I), Steadfast (M), Quantity (N) */}
-                <div className="pt-2 border-t border-[#20222d] flex items-center justify-between gap-2 flex-wrap">
-                  {/* Left Controls: Variant (H), Source (I), Steadfast (M) */}
-                  <div className="flex items-center gap-1.5 flex-wrap flex-1">
-                    {/* Variant Selector Button (Column H) */}
-                    <div className="relative">
-                      <button
-                        type="button"
-                        onClick={(e) => toggleDropdown(e, orderKey, 'variant')}
-                        className={`px-2 py-1 rounded-md text-[11px] font-medium border flex items-center gap-1 transition-all cursor-pointer ${getVariantStyle(order.variant)}`}
-                        title="H: ভ্যারিয়েন্ট পরিবর্তন করুন"
-                      >
-                        <Tag className="w-3 h-3 opacity-70" />
-                        <span className="text-[10px] font-bold opacity-75">H:</span>
-                        <span className="max-w-[85px] sm:max-w-[110px] truncate">
-                          {order.variant || 'No Sellect'}
-                        </span>
-                        <ChevronDown className="w-2.5 h-2.5 opacity-60" />
-                      </button>
-
-                      {/* Dropdown Menu for Variant */}
-                      {activeDropdown?.orderKey === orderKey && activeDropdown?.type === 'variant' && (
-                        <div
-                          onClick={(e) => e.stopPropagation()}
-                          className="absolute left-0 top-full mt-1 w-48 max-h-60 overflow-y-auto bg-[#181822] border border-[#2f2f40] rounded-xl shadow-2xl py-1.5 z-50 animate-fadeIn"
-                        >
-                          <div className="px-3 py-1 text-[10px] text-gray-400 font-semibold border-b border-[#252535] sticky top-0 bg-[#181822] z-10">
-                            H: ভ্যারিয়েন্ট সিলেক্ট করুন
-                          </div>
-                          {availableVariants.map((v) => (
-                            <button
-                              key={v}
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (onUpdateVariant) onUpdateVariant(order, v);
-                                setActiveDropdown(null);
-                              }}
-                              className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#252535] flex items-center justify-between cursor-pointer"
-                            >
-                              <span className="truncate">{v}</span>
-                              {order.variant === v && (
-                                <Check className="w-3 h-3 text-pink-400 shrink-0 ml-1" />
-                              )}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Source Selector Button (Column I) */}
-                    <div className="relative">
-                      <button
-                        type="button"
-                        onClick={(e) => toggleDropdown(e, orderKey, 'source')}
-                        className={`px-2 py-1 rounded-md text-[11px] font-medium border flex items-center gap-1 transition-all cursor-pointer ${getSourceStyle(order.source)}`}
-                        title="I: সোর্স পরিবর্তন করুন"
-                      >
-                        <Globe className="w-3 h-3 opacity-70" />
-                        <span className="text-[10px] font-bold opacity-75">I:</span>
-                        <span className="max-w-[70px] sm:max-w-[90px] truncate">
-                          {order.source || 'Website'}
-                        </span>
-                        <ChevronDown className="w-2.5 h-2.5 opacity-60" />
-                      </button>
-
-                      {/* Dropdown Menu for Source */}
-                      {activeDropdown?.orderKey === orderKey && activeDropdown?.type === 'source' && (
-                        <div
-                          onClick={(e) => e.stopPropagation()}
-                          className="absolute left-0 top-full mt-1 w-44 max-h-60 overflow-y-auto bg-[#181822] border border-[#2f2f40] rounded-xl shadow-2xl py-1.5 z-50 animate-fadeIn"
-                        >
-                          <div className="px-3 py-1 text-[10px] text-gray-400 font-semibold border-b border-[#252535] sticky top-0 bg-[#181822] z-10">
-                            I: সোর্স সিলেক্ট করুন
-                          </div>
-                          {availableSources.map((src) => (
-                            <button
-                              key={src}
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (onUpdateSource) onUpdateSource(order, src);
-                                setActiveDropdown(null);
-                              }}
-                              className="w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-[#252535] flex items-center justify-between cursor-pointer"
-                            >
-                              <span>{src}</span>
-                              {order.source === src && (
-                                <Check className="w-3 h-3 text-blue-400" />
-                              )}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Tracking Code Badge (Column K) */}
-                    {order.trackingCode && (
-                      <button
-                        type="button"
-                        onClick={(e) => handleCopyTracking(e, order.trackingCode!)}
-                        className="px-2 py-0.5 rounded bg-[#101b2e] hover:bg-[#16253f] border border-blue-800/40 text-cyan-300 font-mono text-[10px] flex items-center gap-1 cursor-pointer"
-                        title="ট্র্যাকিং কোড কপি করুন"
-                      >
-                        <span>K: {order.trackingCode}</span>
-                        {copiedTracking === order.trackingCode ? (
-                          <Check className="w-2.5 h-2.5 text-emerald-400" />
-                        ) : (
-                          <Copy className="w-2.5 h-2.5 text-gray-400" />
-                        )}
-                      </button>
-                    )}
-
-                    {/* Courier Status (Column L) */}
-                    {order.courierStatus && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-950/40 text-purple-300 border border-purple-800/40 font-mono">
-                        L: {order.courierStatus}
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Right: Quantity Stepper (Column N) */}
-                  <div
-                    onClick={(e) => e.stopPropagation()}
-                    className="flex items-center gap-1 bg-[#0f1015] border border-[#272a38] rounded-md px-1.5 py-0.5 shrink-0"
-                  >
-                    <span className="text-[10px] text-gray-500 font-bold">N:</span>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const current = order.quantity || 1;
-                        if (current > 1 && onUpdateQuantity) {
-                          onUpdateQuantity(order, current - 1);
-                        }
-                      }}
-                      disabled={(order.quantity || 1) <= 1}
-                      className="w-5 h-5 rounded flex items-center justify-center bg-[#1d1f2b] hover:bg-[#2b2e40] text-gray-300 disabled:opacity-30 text-xs font-bold transition-colors cursor-pointer"
-                      title="পরিমাণ কমান (Col N)"
-                    >
-                      <Minus className="w-2.5 h-2.5" />
-                    </button>
-                    <span className="font-mono font-bold text-xs text-white min-w-[20px] text-center">
-                      {order.quantity || 1}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const current = order.quantity || 1;
-                        if (onUpdateQuantity) {
-                          onUpdateQuantity(order, current + 1);
-                        }
-                      }}
-                      className="w-5 h-5 rounded flex items-center justify-center bg-[#1d1f2b] hover:bg-[#2b2e40] text-gray-300 text-xs font-bold transition-colors cursor-pointer"
-                      title="পরিমাণ বাড়ান (Col N)"
-                    >
-                      <Plus className="w-2.5 h-2.5" />
-                    </button>
+                    <ChevronRight className="w-3.5 h-3.5 text-gray-600 group-hover:text-gray-400 transition-colors shrink-0" />
                   </div>
                 </div>
               </div>
