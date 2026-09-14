@@ -72,6 +72,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
   ];
 
   const handleNavClick = (tabId: MainTabType) => {
+    if (tabId === 'sheet') {
+      onOpenSettings();
+      if (onCloseMobile) {
+        onCloseMobile();
+      }
+      return;
+    }
     setActiveTab(tabId);
     if (onCloseMobile) {
       onCloseMobile();

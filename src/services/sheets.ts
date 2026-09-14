@@ -427,7 +427,8 @@ export const fetchOrdersViaAppsScript = async (
           trackingCode: o.courier_id || undefined,
           courierStatus: o.courier_status || undefined,
           steadfastStatus: o.courier_action || (o.courier_id ? 'send to steadfast' : 'No Sellect'),
-          date: o.date ? formatSheetDate(o.date) : '08/09/26',
+          date: o.date ? String(o.date).trim() : '08/09/26',
+          rawDate: o.date ? String(o.date).trim() : undefined,
           rowIndex: Number(o.row_number) || 2,
         };
       });
@@ -437,6 +438,43 @@ export const fetchOrdersViaAppsScript = async (
     console.warn('Apps Script GET orders fallback failed:', err);
   }
   return { orders: [], tabName: 'Sheet2' };
+};
+
+/**
+ * Extract the exact text of Column A from Google Sheet (cell object or string)
+ * preserving timestamps such as "9/9/2026 19:50:48" without trimming time.
+ */
+export const extractColumnAText = (cellOrValue: any): string => {
+  if (cellOrValue === null || cellOrValue === undefined) return '';
+
+  if (typeof cellOrValue === 'object') {
+    // 1. Google Visualization formatted string (e.g. cell.f = "9/9/2026 19:50:48")
+    if (cellOrValue.f !== null && cellOrValue.f !== undefined && String(cellOrValue.f).trim() !== '') {
+      return String(cellOrValue.f).trim();
+    }
+    const v = cellOrValue.v;
+    if (v !== null && v !== undefined) {
+      const vStr = String(v).trim();
+      // Google Visualization Date(yyyy, m, d[, h, min, s]) constructor string
+      const gvizMatch = vStr.match(/Date\((\d{4}),\s*(\d{1,2}),\s*(\d{1,2})(?:,\s*(\d{1,2}),\s*(\d{1,2}),\s*(\d{1,2}))?\)/);
+      if (gvizMatch) {
+        const y = gvizMatch[1];
+        const m = parseInt(gvizMatch[2], 10) + 1; // 0-based month in gviz
+        const d = parseInt(gvizMatch[3], 10);
+        if (gvizMatch[4] !== undefined) {
+          const hh = parseInt(gvizMatch[4], 10);
+          const mm = String(gvizMatch[5] || '0').padStart(2, '0');
+          const ss = String(gvizMatch[6] || '0').padStart(2, '0');
+          return `${m}/${d}/${y} ${hh}:${mm}:${ss}`;
+        }
+        return `${m}/${d}/${y}`;
+      }
+      return vStr;
+    }
+    return '';
+  }
+
+  return String(cellOrValue).trim();
 };
 
 /**
@@ -617,7 +655,8 @@ export const fetchPublicSheetOrders = async (
 
             // Date from Column A (or date header)
             const dateCell = cells ? (dateCol !== -1 && cells[dateCol] !== undefined ? cells[dateCol] : cells[0]) : null;
-            const dateVal = formatSheetDate(dateCell) || '08/09/26';
+            const rawColADate = extractColumnAText(dateCell);
+            const dateVal = rawColADate || formatSheetDate(dateCell) || '08/09/26';
 
             // Must have at least an invoice ID, name, phone, or tracking code
             if (!rawId && !nameVal && !phoneVal && !trackVal) continue;
@@ -644,6 +683,7 @@ export const fetchPublicSheetOrders = async (
               courierStatus: courierVal || undefined,
               steadfastStatus: steadfastVal,
               date: dateVal,
+              rawDate: rawColADate || dateVal,
               rowIndex: i + 2, // 1-indexed (row 1 is header)
             });
           }
@@ -900,6 +940,9 @@ export const getSheetOrders = async (
       }
       seenValIds.add(finalId);
 
+      const rawColADate = String(r[0] !== undefined && r[0] !== null ? r[0] : '').trim();
+      const dateVal = rawColADate || '08/09/26';
+
       orders.push({
         id: finalId,
         customerName: nameVal || (phoneVal ? `গ্রাহক (${phoneVal.slice(-4)})` : (finalId ? `অর্ডার #${finalId}` : `গ্রাহক #${i + 1}`)),
@@ -915,7 +958,8 @@ export const getSheetOrders = async (
         trackingCode: trackVal || undefined,
         courierStatus: courierVal || undefined,
         steadfastStatus: steadfastVal,
-        date: '08/09/26',
+        date: dateVal,
+        rawDate: rawColADate || undefined,
         rowIndex: i + 1, // 1-indexed Google Sheet row
       });
     }
@@ -945,8 +989,23 @@ export const saveAppsScriptUrl = (url: string) => {
 
 export const APPS_SCRIPT_URL = DEFAULT_APPS_SCRIPT_URL;
 
+export interface OrderCardPayload {
+  action: 'update_order_card';
+  date: string;
+  address: string;
+  number: string;
+  price: number;
+  name: string;
+  productSelect: string;
+  orderSource: string;
+  orderStatus: string;
+  columnMValue: string;
+  [key: string]: any;
+}
+
 export interface OrderCardUpdateParams {
-  trackingId: string;
+  date?: string;
+  trackingId?: string;
   address?: string;
   number?: string;
   price?: number;
@@ -955,7 +1014,83 @@ export interface OrderCardUpdateParams {
   orderSource?: string;   // Col I
   orderStatus?: string;   // Col J
   columnMValue?: string;  // Col M (No Select / send to steadfast)
+  [key: string]: any;
 }
+
+/**
+ * Builds the exact 10-key payload requested by the user:
+ * {
+ *   "action": "update_order_card",
+ *   "date": "9/9/2026 19:50:48",
+ *   "address": "gzaipur dhaka",
+ *   "number": "18803555000",
+ *   "price": 599,
+ *   "name": "SAZID",
+ *   "productSelect": "Doll and toys",
+ *   "orderSource": "Whatsapp",
+ *   "orderStatus": "Hold",
+ *   "columnMValue": "send to steadfast"
+ * }
+ */
+export const buildOrderCardPayload = (
+  order: Order,
+  overrides: Partial<OrderCardPayload> = {}
+): OrderCardPayload => {
+  // Column A date text: prioritize rawDate if available, otherwise order.date
+  const dateVal = overrides.date !== undefined
+    ? String(overrides.date)
+    : String(order.rawDate || order.date || '').trim();
+
+  const addressVal = overrides.address !== undefined
+    ? String(overrides.address)
+    : String(order.customerAddress || '').trim();
+
+  const numberVal = overrides.number !== undefined
+    ? String(overrides.number)
+    : String(order.customerPhone || '').trim();
+
+  const priceVal = overrides.price !== undefined
+    ? Number(overrides.price) || 0
+    : Number(order.amount ?? order.total ?? 0) || 0;
+
+  const nameVal = overrides.name !== undefined
+    ? String(overrides.name)
+    : String(order.customerName || '').trim();
+
+  const productSelectVal = overrides.productSelect !== undefined
+    ? String(overrides.productSelect)
+    : String(order.variant || order.product || 'No Sellect').trim();
+
+  const orderSourceVal = overrides.orderSource !== undefined
+    ? String(overrides.orderSource)
+    : String(order.source || 'Website').trim();
+
+  const orderStatusVal = overrides.orderStatus !== undefined
+    ? String(overrides.orderStatus)
+    : String(order.status || 'Pending').trim();
+
+  const isSteadfast =
+    order.steadfastStatus === 'send to steadfast' ||
+    order.steadfastStatus === 'Sent to Steadfast' ||
+    /send to steadfast/i.test(order.steadfastStatus || '');
+
+  const columnMVal = overrides.columnMValue !== undefined
+    ? String(overrides.columnMValue)
+    : (isSteadfast ? 'send to steadfast' : String(order.steadfastStatus || 'No Select').trim());
+
+  return {
+    action: 'update_order_card',
+    date: dateVal,
+    address: addressVal,
+    number: numberVal,
+    price: priceVal,
+    name: nameVal,
+    productSelect: productSelectVal,
+    orderSource: orderSourceVal,
+    orderStatus: orderStatusVal,
+    columnMValue: columnMVal,
+  };
+};
 
 /**
  * Update order card directly via Apps Script Web App
@@ -965,7 +1100,7 @@ export interface OrderCardUpdateParams {
  *   headers: { "Content-Type": "text/plain;charset=utf-8" },
  *   body: JSON.stringify({
  *     action: "update_order_card",
- *     trackingId: "...",
+ *     date: "9/9/2026 19:50:48",
  *     address: "...",
  *     number: "...",
  *     price: 599,
@@ -978,30 +1113,37 @@ export interface OrderCardUpdateParams {
  * });
  */
 export const updateOrderCardViaAppsScript = async (
-  payload: OrderCardUpdateParams,
+  payload: OrderCardUpdateParams | OrderCardPayload | any,
   scriptUrl: string = getAppsScriptUrl()
 ) => {
   const WEB_APP_URL = scriptUrl || getAppsScriptUrl();
 
+  // Construct the exact 10-key JSON body specified by the user
   const bodyData: Record<string, any> = {
-    action: "update_order_card",
-    trackingId: String(payload.trackingId || '').trim(),
+    action: 'update_order_card',
+    date: String(payload.date || '').trim(),
+    address: String(payload.address || '').trim(),
+    number: String(payload.number || '').trim(),
+    price: Number(payload.price) || 0,
+    name: String(payload.name || '').trim(),
+    productSelect: String(payload.productSelect || '').trim(),
+    orderSource: String(payload.orderSource || '').trim(),
+    orderStatus: String(payload.orderStatus || '').trim(),
+    columnMValue: String(payload.columnMValue || '').trim(),
   };
 
-  if (payload.address !== undefined) bodyData.address = payload.address;
-  if (payload.number !== undefined) bodyData.number = payload.number;
-  if (payload.price !== undefined) bodyData.price = Number(payload.price) || 0;
-  if (payload.name !== undefined) bodyData.name = payload.name;
-  if (payload.productSelect !== undefined) bodyData.productSelect = payload.productSelect;
-  if (payload.orderSource !== undefined) bodyData.orderSource = payload.orderSource;
-  if (payload.orderStatus !== undefined) bodyData.orderStatus = payload.orderStatus;
-  if (payload.columnMValue !== undefined) bodyData.columnMValue = payload.columnMValue;
+  if (payload.trackingId) {
+    bodyData.trackingId = String(payload.trackingId).trim();
+  }
+
+  const jsonString = JSON.stringify(bodyData);
+  console.log('[Webhook POST] update_order_card payload:', jsonString);
 
   try {
     const res = await fetch(WEB_APP_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify(bodyData),
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: jsonString,
     });
 
     if (res.ok) {
@@ -1009,17 +1151,127 @@ export const updateOrderCardViaAppsScript = async (
       return data;
     }
   } catch (err) {
-    console.warn("Apps Script direct POST error, retrying with fallback:", err);
+    console.warn('Apps Script direct POST error, retrying with fallback:', err);
     try {
       await fetch(WEB_APP_URL, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify(bodyData),
-        mode: "no-cors",
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: jsonString,
+        mode: 'no-cors',
       });
       return { success: true };
     } catch (e2) {
-      console.warn("Apps Script no-cors dispatched:", e2);
+      console.warn('Apps Script no-cors dispatched:', e2);
+    }
+  }
+
+  return { success: true };
+};
+
+export interface SteadfastOrderItemPayload {
+  date: string;
+  number: string;
+  columnMValue: string;
+}
+
+export type SteadfastDispatchPayload =
+  | SteadfastOrderItemPayload
+  | SteadfastOrderItemPayload[];
+
+/**
+ * Builds an individual Steadfast dispatch item matching:
+ * {
+ *   "date": "9/14/2026 10:00:00",
+ *   "number": "01700000000",
+ *   "columnMValue": "Send to Steadfast"
+ * }
+ */
+export const buildSteadfastOrderItem = (
+  order: Order,
+  columnMValue: string = 'Send to Steadfast'
+): SteadfastOrderItemPayload => {
+  const rawDate = String(order.rawDate || order.date || '').trim();
+  const phone = String(order.customerPhone || '').trim();
+  return {
+    date: rawDate,
+    number: phone,
+    columnMValue,
+  };
+};
+
+/**
+ * Builds the payload for sending orders to Steadfast via Google Apps Script:
+ * - Single order -> 1 object: { date, number, columnMValue: "Send to Steadfast" }
+ * - Multiple orders (bulk/select all) -> Array of objects: [ { date, number, columnMValue }, ... ]
+ */
+export const buildSteadfastDispatchPayload = (
+  orders: Order | Order[],
+  columnMValue: string = 'Send to Steadfast'
+): SteadfastDispatchPayload => {
+  if (Array.isArray(orders)) {
+    if (orders.length === 1) {
+      return buildSteadfastOrderItem(orders[0], columnMValue);
+    }
+    return orders.map((o) => buildSteadfastOrderItem(o, columnMValue));
+  }
+  return buildSteadfastOrderItem(orders, columnMValue);
+};
+
+/**
+ * Dispatches the exact JSON format requested when sending orders to Steadfast:
+ * Single order:
+ * {
+ *   "date": "9/14/2026 10:00:00",
+ *   "number": "01700000000",
+ *   "columnMValue": "Send to Steadfast"
+ * }
+ * Bulk array:
+ * [
+ *   {
+ *     "date": "9/14/2026 10:00:00",
+ *     "number": "01700000000",
+ *     "columnMValue": "Send to Steadfast"
+ *   },
+ *   ...
+ * ]
+ */
+export const sendSteadfastOrdersViaAppsScript = async (
+  orders: Order | Order[],
+  columnMValue: string = 'Send to Steadfast',
+  scriptUrl: string = getAppsScriptUrl()
+) => {
+  if (Array.isArray(orders) && orders.length === 0) {
+    return { success: true };
+  }
+
+  const WEB_APP_URL = scriptUrl || getAppsScriptUrl();
+  const payload = buildSteadfastDispatchPayload(orders, columnMValue);
+  const jsonString = JSON.stringify(payload);
+  console.log('[Webhook POST - Steadfast Dispatch] payload:', jsonString);
+
+  try {
+    const res = await fetch(WEB_APP_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: jsonString,
+    });
+
+    if (res.ok) {
+      const data = await res.json().catch(() => ({ success: true }));
+      return data;
+    }
+  } catch (err) {
+    console.warn('Steadfast Apps Script direct POST error, retrying with fallback:', err);
+    try {
+      await fetch(WEB_APP_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: jsonString,
+        mode: 'no-cors',
+      });
+      return { success: true };
+    } catch (e2) {
+      console.warn('Steadfast Apps Script no-cors dispatched:', e2);
     }
   }
 

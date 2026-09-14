@@ -42,6 +42,8 @@ import {
   updateSheet3Entry,
   appendSheet3Entry,
   updateOrderCardViaAppsScript,
+  buildOrderCardPayload,
+  sendSteadfastOrdersViaAppsScript,
 } from './services/sheets';
 import { Sidebar, MainTabType } from './components/Sidebar';
 import { DashboardHome } from './components/DashboardHome';
@@ -516,10 +518,9 @@ export default function App() {
     }
 
     // Dispatch exact JSON payload requested by user to Apps Script
-    updateOrderCardViaAppsScript({
-      trackingId,
-      orderStatus: newStatus,
-    });
+    updateOrderCardViaAppsScript(
+      buildOrderCardPayload(order, { orderStatus: newStatus })
+    );
 
     try {
       await updateSheetOrderStatus(
@@ -555,10 +556,9 @@ export default function App() {
     }
 
     // Dispatch exact JSON payload requested by user to Apps Script
-    updateOrderCardViaAppsScript({
-      trackingId,
-      productSelect: newVariant,
-    });
+    updateOrderCardViaAppsScript(
+      buildOrderCardPayload(order, { productSelect: newVariant })
+    );
 
     try {
       await updateSheetVariant(
@@ -594,10 +594,9 @@ export default function App() {
     }
 
     // Dispatch exact JSON payload requested by user to Apps Script
-    updateOrderCardViaAppsScript({
-      trackingId,
-      orderSource: newSource,
-    });
+    updateOrderCardViaAppsScript(
+      buildOrderCardPayload(order, { orderSource: newSource })
+    );
 
     try {
       await updateSheetSource(
@@ -624,6 +623,11 @@ export default function App() {
     if (selectedOrderForView && isSameOrder(selectedOrderForView, order)) {
       setSelectedOrderForView((prev) => (prev ? { ...prev, courierStatus: newCourierStatus } : null));
     }
+
+    // Dispatch exact JSON payload to Apps Script webhook
+    updateOrderCardViaAppsScript(
+      buildOrderCardPayload(order)
+    );
 
     try {
       await updateSheetCourierStatus(
@@ -702,11 +706,16 @@ export default function App() {
     }
 
     const trackingId = String(order.trackingCode || order.id || '').trim();
-    // Dispatch exact JSON payload requested by user to Apps Script
-    updateOrderCardViaAppsScript({
-      trackingId,
-      columnMValue: finalSteadfastStatus === 'send to steadfast' ? 'send to steadfast' : 'No Select',
-    });
+    // Dispatch webhook for Steadfast dispatch when sending to steadfast
+    if (finalSteadfastStatus === 'send to steadfast') {
+      sendSteadfastOrdersViaAppsScript(order, 'Send to Steadfast');
+    } else {
+      updateOrderCardViaAppsScript(
+        buildOrderCardPayload(order, {
+          columnMValue: 'No Select',
+        })
+      );
+    }
 
     try {
       // Write strictly to Column M in Google Sheet in real-time
@@ -754,6 +763,9 @@ export default function App() {
     );
 
     showToast(`⚡ ${ordersToSend.length}টি অর্ডার গুগল শিটের M কলামে 'send to steadfast' পাঠানো হচ্ছে...`);
+
+    // Dispatch webhook for Steadfast dispatch (Single Object if 1 order, Bulk Array if >1 orders)
+    sendSteadfastOrdersViaAppsScript(ordersToSend, 'Send to Steadfast');
 
     const updates = ordersToSend.map((o) => ({
       rowIndex: resolveRowIndex(o),
@@ -811,6 +823,11 @@ export default function App() {
     if (selectedOrderForView && isSameOrder(selectedOrderForView, order)) {
       setSelectedOrderForView((prev) => (prev ? { ...prev, quantity: newQuantity, rowIndex: targetRow } : null));
     }
+
+    // Dispatch webhook for updated order
+    updateOrderCardViaAppsScript(
+      buildOrderCardPayload(order)
+    );
 
     try {
       await updateSheetQuantity(
@@ -894,13 +911,14 @@ export default function App() {
 
     const trackingId = String(order.trackingCode || order.id || '').trim();
     // Dispatch exact JSON payload requested by user to Apps Script
-    updateOrderCardViaAppsScript({
-      trackingId,
-      name: details.customerName,
-      number: details.customerPhone,
-      address: details.customerAddress,
-      price: newAmount,
-    });
+    updateOrderCardViaAppsScript(
+      buildOrderCardPayload(order, {
+        name: details.customerName,
+        number: details.customerPhone,
+        address: details.customerAddress,
+        price: newAmount,
+      })
+    );
 
     try {
       await updateSheetCustomerDetails(
@@ -1296,6 +1314,20 @@ export default function App() {
               spreadsheetId={spreadsheetId}
               orders={orders}
             />
+          )}
+
+          {activeTab === 'sheet' && (
+            <div className="text-center py-16 bg-[#11141d] rounded-2xl border border-[#1f2536] p-8 max-w-md mx-auto mt-8">
+              <FileSpreadsheet className="w-12 h-12 text-pink-400 mx-auto mb-3" />
+              <h3 className="text-base font-semibold text-white mb-1">গুগল শিট সিঙ্ক সেটিংস</h3>
+              <p className="text-xs text-gray-400 mb-5">আপনার গুগল স্প্রেডশিট আইডি ও সিঙ্ক সংক্রান্ত কনফিগারেশন পরিবর্তন করতে নিচের বাটনে ক্লিক করুন।</p>
+              <button
+                onClick={() => setIsSheetSettingsOpen(true)}
+                className="px-5 py-2.5 bg-gradient-to-r from-pink-500 to-purple-600 text-white rounded-xl text-sm font-medium hover:opacity-95 shadow-lg shadow-pink-500/20"
+              >
+                শিট সেটিংস খুলুন
+              </button>
+            </div>
           )}
         </div>
       </main>

@@ -39,6 +39,7 @@ export interface Order {
   courierStatus?: CourierStatus | string;
   steadfastStatus?: string; // 'send to steadfast' or 'Sent (ID: 8821)'
   date: string;
+  rawDate?: string; // Exact Column A text from Google Sheet (e.g. "9/9/2026 19:50:48")
   notes?: string;
   image?: string; // Optional custom or sheet-specified product image URL
   rowIndex?: number; // 1-based row in Google Sheet

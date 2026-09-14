@@ -24,7 +24,7 @@ import {
   Calendar,
 } from 'lucide-react';
 import { Order, OrderStatus } from '../types';
-import { updateOrderCardViaAppsScript } from '../services/sheets';
+import { updateOrderCardViaAppsScript, buildOrderCardPayload } from '../services/sheets';
 
 export interface OrdersViewProps {
   orders: Order[];
@@ -78,7 +78,6 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   } | null>(null);
 
   const [copiedTracking, setCopiedTracking] = useState<string | null>(null);
-  const [isDispatchingKey, setIsDispatchingKey] = useState<string | null>(null);
 
   // Quick Edit Modal State
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
@@ -90,7 +89,6 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [editVariant, setEditVariant] = useState('No Sellect');
   const [editSource, setEditSource] = useState('Website');
   const [editStatus, setEditStatus] = useState<OrderStatus>('Pending');
-  const [editSteadfast, setEditSteadfast] = useState<string>('No Select');
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
   // Close dropdown when clicking outside
@@ -114,11 +112,6 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     setEditVariant(order.variant || 'No Sellect');
     setEditSource(order.source || 'Website');
     setEditStatus(order.status || 'Pending');
-    const isSent =
-      order.steadfastStatus === 'send to steadfast' ||
-      order.steadfastStatus === 'Sent to Steadfast' ||
-      /send to steadfast/i.test(order.steadfastStatus || '');
-    setEditSteadfast(isSent ? 'send to steadfast' : 'No Select');
   };
 
   // Save all edited fields directly to Google Sheet
@@ -130,20 +123,21 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     try {
       const order = editingOrder;
       const trackingId = String(order.trackingCode || order.id || '').trim();
-      const colM = editSteadfast === 'send to steadfast' ? 'send to steadfast' : 'No Select';
+      const colM = String(order.steadfastStatus || 'No Select').trim();
 
-      // 1. Dispatch exact requested POST payload to Apps Script WEB_APP_URL
-      await updateOrderCardViaAppsScript({
-        trackingId,
-        address: editAddress.trim(),
-        number: editPhone.trim(),
-        price: Number(editPrice) || 0,
-        name: editName.trim(),
-        productSelect: editVariant,
-        orderSource: editSource,
-        orderStatus: editStatus,
-        columnMValue: colM,
-      });
+      // 1. Dispatch exact requested POST payload with Column A date to Apps Script WEB_APP_URL
+      await updateOrderCardViaAppsScript(
+        buildOrderCardPayload(order, {
+          address: editAddress.trim(),
+          number: editPhone.trim(),
+          price: Number(editPrice) || 0,
+          name: editName.trim(),
+          productSelect: editVariant,
+          orderSource: editSource,
+          orderStatus: editStatus,
+          columnMValue: colM,
+        })
+      );
 
       const tasks: Promise<any>[] = [];
 
@@ -180,16 +174,6 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       // Status (Col J)
       if (onUpdateOrderStatus && editStatus !== order.status) {
         tasks.push(Promise.resolve(onUpdateOrderStatus(order, editStatus)));
-      }
-
-      // Steadfast Action (Col M)
-      const isAlreadySent =
-        order.steadfastStatus === 'send to steadfast' ||
-        order.steadfastStatus === 'Sent to Steadfast' ||
-        /send to steadfast/i.test(order.steadfastStatus || '');
-      const targetIsSent = editSteadfast === 'send to steadfast';
-      if (isAlreadySent !== targetIsSent && onToggleSteadfast) {
-        tasks.push(Promise.resolve(onToggleSteadfast(order, editSteadfast as any)));
       }
 
       await Promise.allSettled(tasks);
@@ -395,22 +379,6 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     setTimeout(() => setCopiedTracking(null), 2000);
   };
 
-  const handleSteadfastAction = async (
-    e: React.MouseEvent,
-    order: Order,
-    action: 'No Sellect' | 'send to steadfast',
-    orderKey: string
-  ) => {
-    e.stopPropagation();
-    setActiveDropdown(null);
-    setIsDispatchingKey(orderKey);
-    try {
-      await onToggleSteadfast(order, action);
-    } finally {
-      setIsDispatchingKey(null);
-    }
-  };
-
   const toggleDropdown = (e: React.MouseEvent, orderKey: string, type: DropdownType) => {
     e.stopPropagation();
     if (activeDropdown?.orderKey === orderKey && activeDropdown?.type === type) {
@@ -538,11 +506,6 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
             const orderKey = getOrderKey(order, index);
             const statusStyle = getStatusBadgeStyle(order.status);
             const displayAmount = order.total || order.amount || 599;
-
-            const isSteadfastSent =
-              order.steadfastStatus === 'send to steadfast' ||
-              order.steadfastStatus === 'Sent to Steadfast' ||
-              /send to steadfast/i.test(order.steadfastStatus || '');
 
             return (
               <div
@@ -765,39 +728,6 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                       )}
                     </div>
 
-                    {/* Steadfast Courier Action Button (Column M) */}
-                    {isSteadfastSent ? (
-                      <button
-                        type="button"
-                        onClick={(e) => handleSteadfastAction(e, order, 'No Sellect', orderKey)}
-                        disabled={isDispatchingKey === orderKey}
-                        className="px-2.5 py-1 rounded-md bg-[#123826] hover:bg-[#1a4d34] text-emerald-300 text-[11px] font-semibold flex items-center gap-1 border border-emerald-600/50 shadow-xs transition-all cursor-pointer"
-                        title="ক্লিক করলে স্টেডফাস্ট বাতিল হয়ে 'No Sellect' হবে"
-                      >
-                        {isDispatchingKey === orderKey ? (
-                          <Loader2 className="w-3 h-3 animate-spin text-emerald-400" />
-                        ) : (
-                          <Check className="w-3 h-3 text-emerald-400" />
-                        )}
-                        <span>M: Sent</span>
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={(e) => handleSteadfastAction(e, order, 'send to steadfast', orderKey)}
-                        disabled={isDispatchingKey === orderKey}
-                        className="px-2.5 py-1 rounded-md bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-[11px] font-bold shadow-xs transition-all active:scale-95 cursor-pointer flex items-center gap-1"
-                        title="ক্লিক করলে শিটের M কলামে 'send to steadfast' যাবে"
-                      >
-                        {isDispatchingKey === orderKey ? (
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <Truck className="w-3 h-3" />
-                        )}
-                        <span>M: Send Steadfast</span>
-                      </button>
-                    )}
-
                     {/* Tracking Code Badge (Column K) */}
                     {order.trackingCode && (
                       <button
@@ -1010,38 +940,22 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 </div>
               </div>
 
-              {/* Grid: Status (Col J) & Steadfast Action (Col M) */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-gray-300 mb-1">
-                    অর্ডার স্ট্যাটাস (Column J):
-                  </label>
-                  <select
-                    value={editStatus}
-                    onChange={(e) => setEditStatus(e.target.value as OrderStatus)}
-                    className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-pink-500 font-semibold"
-                  >
-                    {availableStatuses.map((st) => (
-                      <option key={st} value={st}>
-                        {st}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-gray-300 mb-1">
-                    Steadfast কুরিয়ার (Col M):
-                  </label>
-                  <select
-                    value={editSteadfast}
-                    onChange={(e) => setEditSteadfast(e.target.value as any)}
-                    className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-pink-500 font-semibold"
-                  >
-                    <option value="No Select">No Select</option>
-                    <option value="send to steadfast">send to steadfast</option>
-                  </select>
-                </div>
+              {/* Status (Col J) */}
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 mb-1">
+                  অর্ডার স্ট্যাটাস (Column J):
+                </label>
+                <select
+                  value={editStatus}
+                  onChange={(e) => setEditStatus(e.target.value as OrderStatus)}
+                  className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-pink-500 font-semibold"
+                >
+                  {availableStatuses.map((st) => (
+                    <option key={st} value={st}>
+                      {st}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               {/* Footer Buttons */}

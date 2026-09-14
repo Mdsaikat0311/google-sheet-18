@@ -4,7 +4,6 @@ import {
   Printer,
   Copy,
   Check,
-  Rocket,
   Phone,
   MapPin,
   Calendar,
@@ -442,46 +441,17 @@ export const ViewOrderModal: React.FC<ViewOrderModalProps> = ({
               </span>
             </div>
 
-            {/* Steadfast Action Button (Column M) */}
+            {/* Steadfast Status (Column M) - Entry only via Steadfast tab selection */}
             <div className="flex items-center justify-between gap-2 pt-1">
               <div className="text-xs text-gray-300">
-                <span className="text-gray-400">কলাম M অ্যাকশন: </span>
+                <span className="text-gray-400">কলাম M: </span>
                 <strong className={isSteadfastSent ? 'text-emerald-400' : 'text-gray-400'}>
-                  {order.steadfastStatus || 'No Sellect'}
+                  {order.steadfastStatus || 'No Select'}
                 </strong>
               </div>
-
-              {isSteadfastSent ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (onToggleSteadfast) {
-                      onToggleSteadfast(order, 'No Sellect');
-                    }
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-[#14532d] hover:bg-[#166534] text-white text-xs font-semibold flex items-center gap-1.5 shadow-sm border border-emerald-500/50 transition-all cursor-pointer"
-                  title="স্টেডফাস্ট বাতিল করে 'No Sellect' করুন"
-                >
-                  <Check className="w-3.5 h-3.5" />
-                  <span>M: Sent to Steadfast</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (onToggleSteadfast) {
-                      onToggleSteadfast(order, 'send to steadfast');
-                    } else if (onSendToSteadfast) {
-                      onSendToSteadfast(order);
-                    }
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold shadow-md transition-all active:scale-95 cursor-pointer flex items-center gap-1.5"
-                  title="স্টেডফাস্টে পাঠান"
-                >
-                  <Rocket className="w-3.5 h-3.5" />
-                  <span>M: send to steadfast</span>
-                </button>
-              )}
+              <span className="text-[11px] text-gray-400 font-medium">
+                {isSteadfastSent ? '✅ স্টেডফাস্টে প্রেরিত' : 'Steadfast ট্যাব থেকে পাঠান'}
+              </span>
             </div>
 
             {/* Tracking Code (Column K) */}
@@ -505,7 +475,7 @@ export const ViewOrderModal: React.FC<ViewOrderModalProps> = ({
               </div>
             ) : (
               <div className="text-[11px] text-gray-500 italic">
-                K: কোনো ট্র্যাকিং কোড নেই (send to steadfast দিলে অটোমেটিক আসবে)
+                K: কোনো ট্র্যাকিং কোড নেই (Steadfast ট্যাব থেকে পাঠালে অটোমেটিক আসবে)
               </div>
             )}
           </div>
