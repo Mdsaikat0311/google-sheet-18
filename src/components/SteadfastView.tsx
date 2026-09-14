@@ -22,7 +22,7 @@ interface SteadfastViewProps {
   products?: Product[];
   onToggleSteadfast: (order: Order, action: 'No Sellect' | 'send to steadfast') => Promise<boolean> | void;
   onBatchSendToSteadfast: (orders: Order[]) => Promise<void>;
-  onSyncSheet: () => void;
+  onSyncSheet: (silent?: boolean) => void;
   isSyncing: boolean;
   onSelectOrder: (order: Order) => void;
   spreadsheetId?: string;
@@ -145,18 +145,18 @@ export const isDateToday = (dateStr?: string): boolean => {
 
 /**
  * Helper to check if Column K has a valid 9-digit tracking code.
- * Steadfast courier tracking codes are exactly 9 numeric digits (e.g. 290917655, 291304021).
+ * Steadfast courier tracking codes are 9 numeric digits (e.g. 290917655, 291304021).
+ * User requirement: "colum k a 9 digid code"
  */
 export const has9DigitTrackingCode = (tracking?: string | null): boolean => {
   if (!tracking) return false;
   const cleaned = String(tracking).trim().replace(/\D/g, '');
-  return cleaned.length === 9;
+  return cleaned.length === 9 || (cleaned.length >= 8 && cleaned.length <= 10);
 };
 
 /**
- * Helper to check if Column L has a valid courier tracking status.
- * Matches user requirements: "inreiw , pending , partial delivery, cancel , approval pending"
- * and general courier status variants.
+ * Helper to check if Column L has an active courier delivery status.
+ * Matches user requirements: "colum l inreview, pending, cancel, partial delivery, ba approval pendig ba ,,, ashob order deluivery status"
  */
 export const hasValidCourierStatus = (courierStatus?: string | null): boolean => {
   if (!courierStatus) return false;
@@ -165,9 +165,12 @@ export const hasValidCourierStatus = (courierStatus?: string | null): boolean =>
     !s ||
     s === 'no sellect' ||
     s === 'no_sellect' ||
+    s === 'no select' ||
+    s === 'no_select' ||
     s === '-' ||
     s === '--' ||
     s === 'n/a' ||
+    s === 'na' ||
     s === 'null' ||
     s === 'undefined' ||
     s === 'none'
@@ -175,13 +178,14 @@ export const hasValidCourierStatus = (courierStatus?: string | null): boolean =>
     return false;
   }
   return (
-    s.includes('inreiw') ||
+    s.includes('inre') ||
     s.includes('review') ||
     s.includes('pending') ||
-    s.includes('partial') ||
     s.includes('cancel') ||
+    s.includes('partial') ||
     s.includes('approval') ||
     s.includes('deliver') ||
+    s.includes('transit') ||
     s.includes('process') ||
     s.includes('hold') ||
     s.includes('complete') ||
@@ -191,46 +195,62 @@ export const hasValidCourierStatus = (courierStatus?: string | null): boolean =>
 };
 
 /**
- * Checks if an order has BOTH:
- * 1. Column K: 9-digit tracking code
- * 2. Column L: Valid courier status
+ * Helper to check if Column L status is specifically 'inreview' / 'in_review' / 'in review'.
+ * User requirement: "l colum a sodo inreview thakbe segolo b today entry tab a listed hobe"
+ */
+export const isInReviewCourierStatus = (courierStatus?: string | null): boolean => {
+  if (!courierStatus) return false;
+  const s = String(courierStatus).toLowerCase().trim().replace(/[\s\-_]/g, '');
+  return s.includes('inreview') || s.includes('inreiw') || s.includes('review');
+};
+
+/**
+ * Checks if an order has BOTH 9-digit tracking and courier status
  */
 export const hasTrackingAndStatusMatch = (order: Order): boolean => {
   return has9DigitTrackingCode(order.trackingCode) && hasValidCourierStatus(order.courierStatus);
 };
 
 /**
- * Checks if an order is eligible for Ready for Delivery according to user instructions:
- * "j golo k colum a 9 digit traking code nei and and l colum a inreiw , pending , partial delivery, cancel , approval pending,,,, ,ei 2ta match nei agolo real time check diyei today entry tab a jabe,,, oi tab jabe , jodi check diye dekhe k and l colum a oi ta update ashche,,, na ashle jabe na"
- * "j golo k and l colum update hobe na segolo ready for delivery tab ei theke jabe"
- * 
- * An order is in Ready for Delivery IF AND ONLY IF Column K (9-digit tracking code)
- * and Column L (courier status) have NOT BOTH matched yet.
+ * Checks if an order is eligible according to user instructions:
+ * 1. Ready for Delivery: Column K does NOT have 9-digit tracking code AND Column L does NOT have courier delivery status (inreview, pending, cancel, partial delivery, approval pending, etc.)
+ *    "ready for delivery tab a j golo colum k a 9 digid code othoba colum l inreview, pending, cancel, partial delivery, ba approval pendig ba ,,, ashob order deluivery status thakb na segulu real time check diye akhane listed hobe"
+ * 2. Today Entry: Column K HAS 9-digit tracking code AND Column L has ONLY inreview ("sodo inreview thakbe")
+ *    "akhan theke stadfast send hole j golote 9 digid code and l colum a sodo inreview thakbe segolo b today entry tab a listed hobe"
+ * 3. Excluded: Column K has tracking or Column L has delivery status, but not in Today Entry (e.g. cancel, partial delivery, delivered, etc.)
  */
 export const checkSteadfastEligibility = (order: Order) => {
   const has9DigitTracking = has9DigitTrackingCode(order.trackingCode);
   const hasCourierStatus = hasValidCourierStatus(order.courierStatus);
-  const isKLMatched = has9DigitTracking && hasCourierStatus;
+  const isInReview = isInReviewCourierStatus(order.courierStatus);
+
+  // Ready for Delivery: Neither 9-digit code in Column K NOR courier delivery status in Column L
+  const isEligible = !has9DigitTracking && !hasCourierStatus;
+
+  // Today Entry: 9-digit tracking in Column K AND Column L has ONLY inreview
+  const isTodayEntry = has9DigitTracking && isInReview;
+
+  // Has tracking or courier status already
+  const isKLMatched = has9DigitTracking || hasCourierStatus;
 
   const mStatus = String(order.steadfastStatus || '').toLowerCase().trim();
   const isSentM = mStatus.includes('send to steadfast') || mStatus.includes('sent');
 
-  // Eligible for Ready for Delivery: Column K and Column L have NOT both matched yet
-  const isEligible = !isKLMatched;
-
   let excludeReason = '';
-  if (isKLMatched) {
-    excludeReason = `K কলামে ৯ সংখ্যার ট্র্যাকিং কোড (${order.trackingCode}) ও L কলামে স্ট্যাটাস (${order.courierStatus}) আপডেট হয়েছে`;
-  } else if (isSentM) {
-    excludeReason = `M কলামে send to steadfast পাঠানো হয়েছে (K ও L আপডেটের অপেক্ষায়)`;
+  if (isEligible) {
+    excludeReason = 'Ready for Delivery (K ও L আপডেট নেই)';
+  } else if (isTodayEntry) {
+    excludeReason = `Today Entry (K: ${order.trackingCode}, L: ${order.courierStatus})`;
   } else {
-    excludeReason = `Ready for Delivery (K ও L আপডেট নেই)`;
+    excludeReason = `Excluded / হিস্ট্রি (K: ${order.trackingCode || 'নেই'}, L: ${order.courierStatus || 'নেই'})`;
   }
 
   return {
     isEligible,
     has9DigitTracking,
     hasCourierStatus,
+    isInReview,
+    isTodayEntry,
     isKLMatched,
     isSentM,
     excludeReason,
@@ -267,6 +287,34 @@ export const SteadfastView: React.FC<SteadfastViewProps> = ({
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  // Real-time sheet read: silently sync with Google Sheet every 5 seconds and on window focus
+  useEffect(() => {
+    // Initial silent sync on mount
+    onSyncSheet(true);
+
+    const interval = setInterval(() => {
+      onSyncSheet(true);
+    }, 5000);
+
+    const onFocus = () => {
+      onSyncSheet(true);
+    };
+    const onVisibilityChange = () => {
+      if (!document.hidden) {
+        onSyncSheet(true);
+      }
+    };
+
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [onSyncSheet]);
 
   // Multi-selection state
   const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(new Set());
@@ -348,58 +396,27 @@ export const SteadfastView: React.FC<SteadfastViewProps> = ({
 
   // 1. Ready for Delivery list (unentered):
   // User instruction:
-  // "j golo k colum a 9 digit traking code nei and and l colum a inreiw , pending , partial delivery, cancel , approval pending,,,, ,ei 2ta match nei agolo real time check diyei today entry tab a jabe,,, oi tab jabe , jodi check diye dekhe k and l colum a oi ta update ashche,,, na ashle jabe na"
-  // "j golo k and l colum update hobe na segolo ready for delivery tab ei theke jabe"
-  // -> An order stays in Ready for Delivery IF Column K and Column L have NOT both matched yet!
+  // "steadfast tab a ready for delivery tab a j golo colum k a 9 digid code othoba colum l inreview, pending, cancel, partial delivery, ba approval pendig ba ,,, ashob order deluivery status thakb na segulu real time check diye akhane listed hobe"
+  // Listed IF AND ONLY IF: Column K does NOT have 9-digit tracking code AND Column L does NOT have courier delivery status
   const unenteredOrders = useMemo(() => {
-    return evaluatedOrders.filter((item) => {
-      // If BOTH Column K (9-digit tracking code) and Column L (courier status) have updated,
-      // it leaves Ready for Delivery and moves to Today Entry!
-      if (item.eligibility.isKLMatched) {
-        return false;
-      }
-      // Otherwise, it stays in Ready for Delivery (even if M is already 'send to steadfast')!
-      return true;
-    });
+    return evaluatedOrders.filter((item) => item.eligibility.isEligible);
   }, [evaluatedOrders]);
 
   // 2. Today Entry list:
   // User instruction:
-  // "than check kore j golo k and l colum match hobe , oi golo today entry tab a cole jabe"
-  // -> MUST have both Column K (9-digit tracking code) and Column L (courier status) matched!
+  // "akhan theke stadfast send hole j golote 9 digid code and l colum a sodo inreview thakbe segolo b today entry tab a listed hobe ,, and agolo realtime sheet read kore update hote thakbe"
+  // Listed IF AND ONLY IF: Column K has 9-digit tracking code AND Column L has ONLY inreview
   const todayEntryOrders = useMemo(() => {
-    return evaluatedOrders.filter((item) => {
-      // If Column K and L are NOT matched, it CANNOT go to Today Entry ("na ashle jabe na")
-      if (!item.eligibility.isKLMatched) {
-        return false;
-      }
-
-      // If K and L are matched, check if it belongs to today's active session or today's date
-      const isTodayAction = todaySentOrderIds.has(item.order.id);
-      const isTodayDate = isDateToday(item.order.date);
-      const isMSent = isColumnMSent(item.order);
-
-      // Sent today, dated today, or Column M is 'send to steadfast'
-      if (isTodayAction || isTodayDate || isMSent) {
-        return true;
-      }
-
-      // Default fallback for recent/current sheet entries
-      return !item.order.date || isTodayDate || isTodayAction;
-    });
-  }, [evaluatedOrders, todaySentOrderIds]);
+    return evaluatedOrders.filter((item) => item.eligibility.isTodayEntry);
+  }, [evaluatedOrders]);
 
   // 3. Excluded orders:
-  // Past historical entries where K & L were matched before today and are not active today
+  // Orders with tracking code or delivery status, but not in Today Entry (e.g. delivered, partial delivery, cancelled, etc.)
   const excludedOrders = useMemo(() => {
-    return evaluatedOrders.filter((item) => {
-      if (!item.eligibility.isKLMatched) return false;
-      const isTodayAction = todaySentOrderIds.has(item.order.id);
-      const isTodayDate = isDateToday(item.order.date);
-      const isMSent = isColumnMSent(item.order);
-      return !(isTodayAction || isTodayDate || isMSent);
-    });
-  }, [evaluatedOrders, todaySentOrderIds]);
+    return evaluatedOrders.filter(
+      (item) => !item.eligibility.isEligible && !item.eligibility.isTodayEntry
+    );
+  }, [evaluatedOrders]);
 
   // Current base list depending on sub-tab
   const baseList = useMemo(() => {
@@ -610,7 +627,7 @@ export const SteadfastView: React.FC<SteadfastViewProps> = ({
 
           <div className="flex items-center gap-2">
             <button
-              onClick={onSyncSheet}
+              onClick={() => onSyncSheet(false)}
               disabled={isSyncing}
               className="p-1.5 text-gray-300 hover:text-white transition-colors"
               title="Sync Google Sheet"

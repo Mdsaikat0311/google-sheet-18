@@ -335,19 +335,23 @@ export default function App() {
     }
   };
 
-  // Real-time listener for Sheet 3 (Fast 7s polling + Window Focus + Tab Visibility refresh)
+  // Real-time listener for Sheet 3 & Orders (Fast polling + Window Focus + Tab Visibility refresh)
   useEffect(() => {
     loadSheet3StockLive(spreadsheetId);
+    syncWithSheet(spreadsheetId, accessToken, orderSheetTab, true);
     const interval = setInterval(() => {
       loadSheet3StockLive(spreadsheetId);
-    }, 7000);
+      syncWithSheet(spreadsheetId, accessToken, orderSheetTab, true);
+    }, 6000);
 
     const onFocus = () => {
       loadSheet3StockLive(spreadsheetId);
+      syncWithSheet(spreadsheetId, accessToken, orderSheetTab, true);
     };
     const onVisibilityChange = () => {
       if (!document.hidden) {
         loadSheet3StockLive(spreadsheetId);
+        syncWithSheet(spreadsheetId, accessToken, orderSheetTab, true);
       }
     };
     window.addEventListener('focus', onFocus);
@@ -358,7 +362,7 @@ export default function App() {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [spreadsheetId]);
+  }, [spreadsheetId, accessToken, orderSheetTab]);
 
   // 1. Initialize Firebase Auth
   useEffect(() => {
@@ -1301,7 +1305,7 @@ export default function App() {
               products={products}
               onToggleSteadfast={handleToggleSteadfast}
               onBatchSendToSteadfast={handleBatchSendToSteadfast}
-              onSyncSheet={() => syncWithSheet()}
+              onSyncSheet={(silent = false) => syncWithSheet(spreadsheetId, accessToken, orderSheetTab, silent)}
               isSyncing={isSyncing}
               onSelectOrder={(order) => setSelectedOrderForView(order)}
               spreadsheetId={spreadsheetId}
