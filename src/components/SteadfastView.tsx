@@ -173,7 +173,10 @@ export const hasValidCourierStatus = (courierStatus?: string | null): boolean =>
     s === 'na' ||
     s === 'null' ||
     s === 'undefined' ||
-    s === 'none'
+    s === 'none' ||
+    s.includes('send to steadfast') ||
+    s === 'sent' ||
+    s === 'send'
   ) {
     return false;
   }
@@ -213,32 +216,38 @@ export const hasTrackingAndStatusMatch = (order: Order): boolean => {
 
 /**
  * Checks if an order is eligible according to user instructions:
- * 1. Ready for Delivery: Column K does NOT have 9-digit tracking code AND Column L does NOT have courier delivery status (inreview, pending, cancel, partial delivery, approval pending, etc.)
- *    "ready for delivery tab a j golo colum k a 9 digid code othoba colum l inreview, pending, cancel, partial delivery, ba approval pendig ba ,,, ashob order deluivery status thakb na segulu real time check diye akhane listed hobe"
- * 2. Today Entry: Column K HAS 9-digit tracking code AND Column L has ONLY inreview ("sodo inreview thakbe")
- *    "akhan theke stadfast send hole j golote 9 digid code and l colum a sodo inreview thakbe segolo b today entry tab a listed hobe"
- * 3. Excluded: Column K has tracking or Column L has delivery status, but not in Today Entry (e.g. cancel, partial delivery, delivered, etc.)
+ * 1. Ready for Delivery: 9-digit tracking (Column K) AND courier delivery status (Column L - inreview or other) must BOTH match together.
+ *    If only 1 matches or neither matches, the order automatically stays in Ready for Delivery ("2 tai match hole hobe, akta match hole hobe na").
+ * 2. Today Entry: Both match, Column K HAS 9-digit tracking code AND Column L has ONLY inreview ("sodo inreview thakbe")
+ * 3. Excluded: Both match, but courier status is other delivery status (e.g. delivered, cancelled, partial delivery, etc.)
  */
 export const checkSteadfastEligibility = (order: Order) => {
   const has9DigitTracking = has9DigitTrackingCode(order.trackingCode);
   const hasCourierStatus = hasValidCourierStatus(order.courierStatus);
   const isInReview = isInReviewCourierStatus(order.courierStatus);
 
-  // Ready for Delivery: Neither 9-digit code in Column K NOR courier delivery status in Column L
-  const isEligible = !has9DigitTracking && !hasCourierStatus;
+  // Both 9-digit tracking code and courier status must match together:
+  // "9 digit and couriar status golo 2 tai match hole hobe ,, akta match hole hobe na"
+  const isKLMatched = has9DigitTracking && hasCourierStatus;
 
-  // Today Entry: 9-digit tracking in Column K AND Column L has ONLY inreview
+  // Ready for Delivery: Automatically stays here if BOTH are not matched together
+  const isEligible = !isKLMatched;
+
+  // Today Entry: 9-digit tracking in Column K AND Column L has inreview
   const isTodayEntry = has9DigitTracking && isInReview;
-
-  // Has tracking or courier status already
-  const isKLMatched = has9DigitTracking || hasCourierStatus;
 
   const mStatus = String(order.steadfastStatus || '').toLowerCase().trim();
   const isSentM = mStatus.includes('send to steadfast') || mStatus.includes('sent');
 
   let excludeReason = '';
   if (isEligible) {
-    excludeReason = 'Ready for Delivery (K ও L আপডেট নেই)';
+    if (!has9DigitTracking && !hasCourierStatus) {
+      excludeReason = 'Ready for Delivery (K ও L ফাঁকা)';
+    } else if (has9DigitTracking && !hasCourierStatus) {
+      excludeReason = 'Ready for Delivery (L কুরিয়ার স্ট্যাটাস অপেক্ষারত)';
+    } else {
+      excludeReason = 'Ready for Delivery (K ট্র্যাকিং কোড অপেক্ষারত)';
+    }
   } else if (isTodayEntry) {
     excludeReason = `Today Entry (K: ${order.trackingCode}, L: ${order.courierStatus})`;
   } else {
@@ -288,21 +297,27 @@ export const SteadfastView: React.FC<SteadfastViewProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Real-time sheet read: silently sync with Google Sheet every 5 seconds and on window focus
+  // Keep stable ref to onSyncSheet to prevent infinite re-render loops
+  const onSyncSheetRef = useRef(onSyncSheet);
+  useEffect(() => {
+    onSyncSheetRef.current = onSyncSheet;
+  }, [onSyncSheet]);
+
+  // Real-time sheet read: silently sync with Google Sheet every 15 seconds and on window focus
   useEffect(() => {
     // Initial silent sync on mount
-    onSyncSheet(true);
+    onSyncSheetRef.current(true);
 
     const interval = setInterval(() => {
-      onSyncSheet(true);
-    }, 5000);
+      onSyncSheetRef.current(true);
+    }, 15000);
 
     const onFocus = () => {
-      onSyncSheet(true);
+      onSyncSheetRef.current(true);
     };
     const onVisibilityChange = () => {
       if (!document.hidden) {
-        onSyncSheet(true);
+        onSyncSheetRef.current(true);
       }
     };
 
@@ -314,7 +329,7 @@ export const SteadfastView: React.FC<SteadfastViewProps> = ({
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [onSyncSheet]);
+  }, []);
 
   // Multi-selection state
   const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(new Set());
@@ -396,8 +411,8 @@ export const SteadfastView: React.FC<SteadfastViewProps> = ({
 
   // 1. Ready for Delivery list (unentered):
   // User instruction:
-  // "steadfast tab a ready for delivery tab a j golo colum k a 9 digid code othoba colum l inreview, pending, cancel, partial delivery, ba approval pendig ba ,,, ashob order deluivery status thakb na segulu real time check diye akhane listed hobe"
-  // Listed IF AND ONLY IF: Column K does NOT have 9-digit tracking code AND Column L does NOT have courier delivery status
+  // "ready for delivery tab a 9 digit number and inreview and courial baki status golo jodi match na hoy,,, tokhoni auto matic akhane thakbe,,, 9 digit and couriar status golo 2 tai match hole hobe ,, akta match hole hobe na"
+  // Order remains in Ready for Delivery UNLESS BOTH 9-digit tracking (Column K) and courier status (Column L) match together.
   const unenteredOrders = useMemo(() => {
     return evaluatedOrders.filter((item) => item.eligibility.isEligible);
   }, [evaluatedOrders]);
@@ -731,21 +746,6 @@ export const SteadfastView: React.FC<SteadfastViewProps> = ({
                 />
               </div>
             </button>
-
-            {selectedProductFilter !== 'ALL' && (
-              <button
-                type="button"
-                id="reset-product-filter-btn"
-                onClick={() => {
-                  setSelectedProductFilter('ALL');
-                  setIsProductToggleOpen(false);
-                }}
-                className="px-3 py-2.5 rounded-xl bg-[#1e1e2c] hover:bg-[#28283a] border border-[#323246] text-xs font-semibold text-purple-300 hover:text-white transition-colors cursor-pointer shrink-0"
-                title="All Product-এ ফিরে যান"
-              >
-                All Product
-              </button>
-            )}
           </div>
 
           {/* Expanded Toggle Menu with All Product + 6 Products + No Sellect */}
@@ -903,6 +903,17 @@ export const SteadfastView: React.FC<SteadfastViewProps> = ({
             const displayAmount = order.total || order.amount || 599;
             const isAlreadySent = isColumnMSent(order);
             const hasKLMatch = eligibility.isKLMatched;
+            const isTodayTab = activeSubTab === 'today_entry';
+
+            // Check if order.id is a duplicate of Column K tracking code (e.g. #290917655)
+            const isTrackingCodeId = Boolean(
+              order.trackingCode && (
+                order.id === order.trackingCode ||
+                order.id.replace(/^#/, '').trim() === String(order.trackingCode).trim() ||
+                order.id.startsWith(String(order.trackingCode).trim()) ||
+                (/^\d{8,12}/.test(order.id.replace(/^#/, '').trim()) && has9DigitTrackingCode(order.id))
+              )
+            );
 
             return (
               <div
@@ -914,19 +925,19 @@ export const SteadfastView: React.FC<SteadfastViewProps> = ({
                     : 'border-[#232430] hover:border-[#383a4c]'
                 }`}
               >
-                {/* Line 1: Checkbox + Order # & Row # on Left, Send Button & M status on Right */}
+                {/* Line 1: Checkbox + Customer Name (on Today Entry) OR Order # & Row # on Left, Badges on Right */}
                 <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 flex-1">
                     {/* Touch-friendly Checkbox */}
                     <div
                       onClick={(e) => toggleSelectOrder(e, order.id)}
-                      className="p-1 -m-1 cursor-pointer shrink-0"
-                      title={isSelected ? 'আনসিলেক্ট' : 'সিলেক্ট'}
+                      className="p-1.5 -m-1 cursor-pointer shrink-0 flex items-center justify-center active:scale-90 transition-transform"
+                      title={isSelected ? 'আনসিলেক্ট' : 'সিলেক্ট করুন'}
                     >
                       <div
                         className={`w-4 h-4 rounded border flex items-center justify-center transition-all ${
                           isSelected
-                            ? 'bg-purple-600 border-purple-500 text-white'
+                            ? 'bg-purple-600 border-purple-500 text-white shadow-xs'
                             : 'border-gray-600 hover:border-purple-400 bg-[#1a1e2d]'
                         }`}
                       >
@@ -934,32 +945,44 @@ export const SteadfastView: React.FC<SteadfastViewProps> = ({
                       </div>
                     </div>
 
-                    <span className="text-xs font-mono font-bold text-gray-400 group-hover:text-purple-400 shrink-0">
-                      {order.id.startsWith('#') ? order.id : `#${order.id}`}
-                    </span>
-                    {order.rowIndex && (
-                      <span className="text-[10px] text-gray-500 font-mono bg-[#1b1c24] px-1.5 py-0.5 rounded border border-[#262835] shrink-0">
-                        Row #{order.rowIndex}
+                    {/* In Today Entry tab: Customer Name placed on upper line */}
+                    {isTodayTab ? (
+                      <span className="text-sm font-bold text-white tracking-tight truncate shrink min-w-0 max-w-[150px] sm:max-w-[220px]">
+                        {order.customerName || 'গ্রাহকের নাম নেই'}
                       </span>
-                    )}
-                    {order.customerPhone && (
-                      <div className="hidden sm:flex items-center gap-1 text-[11px] text-gray-400 font-mono">
-                        <span>• {order.customerPhone}</span>
-                        <button
-                          onClick={(e) => handleCopyPhone(e, order.customerPhone!)}
-                          className="hover:text-white"
-                          title="কপি করুন"
-                        >
-                          <Copy className="w-3 h-3 text-gray-500" />
-                        </button>
-                      </div>
+                    ) : (
+                      <>
+                        {/* Show Order ID only if it's NOT a duplicate of Column K tracking code */}
+                        {!isTrackingCodeId && (
+                          <span className="text-xs font-mono font-bold text-gray-400 group-hover:text-purple-400 shrink-0">
+                            {order.id.startsWith('#') ? order.id : `#${order.id}`}
+                          </span>
+                        )}
+                        {order.rowIndex && (
+                          <span className="text-[10px] text-gray-400 font-mono bg-[#1b1c24] px-1.5 py-0.5 rounded border border-[#262835] shrink-0 font-medium">
+                            Row #{order.rowIndex}
+                          </span>
+                        )}
+                        {order.customerPhone && (
+                          <div className="hidden sm:flex items-center gap-1 text-[11px] text-gray-400 font-mono">
+                            <span>• {order.customerPhone}</span>
+                            <button
+                              onClick={(e) => handleCopyPhone(e, order.customerPhone!)}
+                              className="hover:text-white"
+                              title="কপি করুন"
+                            >
+                              <Copy className="w-3 h-3 text-gray-500" />
+                            </button>
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
 
-                  {/* Right side: Tracking & Status badges + M Column Send Button */}
-                  <div className="flex items-center gap-1.5 shrink-0">
+                  {/* Right side: Tracking & Status badges + M Column Send Button (Visible ONLY when order is selected) */}
+                  <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
                     {order.trackingCode && has9DigitTrackingCode(order.trackingCode) && (
-                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-teal-950/70 text-[#7de3e0] border border-[#235863] shrink-0" title="K কলাম: ৯ সংখ্যার ট্র্যাকিং কোড">
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-teal-950/70 text-[#7de3e0] border border-[#235863] shrink-0 font-semibold" title="K কলাম: ৯ সংখ্যার ট্র্যাকিং কোড">
                         K: {String(order.trackingCode).trim()}
                       </span>
                     )}
@@ -968,55 +991,76 @@ export const SteadfastView: React.FC<SteadfastViewProps> = ({
                         L: {String(order.courierStatus).trim()}
                       </span>
                     )}
-                    {isAlreadySent && !hasKLMatch && (
+                    {!isTodayTab && isAlreadySent && !hasKLMatch && (
                       <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-950/60 text-amber-300 border border-amber-800/40 hidden sm:inline-block shrink-0" title="M কলামে Send করা হয়েছে, K ও L আপডেটের অপেক্ষায়">
                         K, L অপেক্ষারত
                       </span>
                     )}
-                    <button
-                      type="button"
-                      onClick={(e) => handleSingleSend(e, order)}
-                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold border transition-all cursor-pointer ${
-                        isAlreadySent
-                          ? 'bg-[#12281e] text-emerald-300 border-emerald-600/70 shadow-sm hover:bg-[#183528]'
-                          : 'bg-gradient-to-r from-purple-600 to-pink-600 text-white border-purple-500 shadow-sm hover:from-purple-500 hover:to-pink-500'
-                      }`}
-                      title={
-                        isAlreadySent
-                          ? "স্টেডফাস্ট বাতিল করে M কলামে 'No Sellect' করতে ক্লিক করুন"
-                          : "গুগল শিটের M কলামে 'send to steadfast' পাঠান"
-                      }
-                    >
-                      {isAlreadySent ? (
-                        <>
-                          <Check className="w-3 h-3 text-emerald-400 stroke-[3]" />
-                          <span>M: Sent</span>
-                        </>
-                      ) : (
-                        <>
-                          <Send className="w-3 h-3" />
-                          <span>M: Send</span>
-                        </>
-                      )}
-                    </button>
+                    {/* Hide M: Sent in Today Entry tab per user request */}
+                    {!isTodayTab && isAlreadySent && !isSelected && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-950/60 text-emerald-300 border border-emerald-800/40 shrink-0" title="স্টেডফাস্টে M কলামে পাঠানো হয়েছে">
+                        <Check className="w-3 h-3 text-emerald-400 stroke-[3]" />
+                        <span>M: Sent</span>
+                      </span>
+                    )}
+                    {isSelected && (
+                      <button
+                        type="button"
+                        onClick={(e) => handleSingleSend(e, order)}
+                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold border transition-all cursor-pointer active:scale-95 animate-fadeIn ${
+                          isAlreadySent
+                            ? 'bg-[#12281e] text-emerald-300 border-emerald-600/70 shadow-sm hover:bg-[#183528]'
+                            : 'bg-gradient-to-r from-purple-600 to-pink-600 text-white border-purple-500 shadow-sm hover:from-purple-500 hover:to-pink-500'
+                        }`}
+                        title={
+                          isAlreadySent
+                            ? "স্টেডফাস্ট বাতিল করে M কলামে 'No Sellect' করতে ক্লিক করুন"
+                            : "গুগল শিটের M কলামে 'send to steadfast' পাঠান"
+                        }
+                      >
+                        {isAlreadySent ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-400 stroke-[3]" />
+                            <span>M: Sent</span>
+                          </>
+                        ) : (
+                          <>
+                            <Send className="w-3 h-3" />
+                            <span>M: Send</span>
+                          </>
+                        )}
+                      </button>
+                    )}
                   </div>
                 </div>
 
-                {/* Line 2: Customer Name First, then Product Name on Left, Price on Right */}
+                {/* Line 2: Variant (H) & Source (I) on Left, Price on Right */}
                 <div className="mt-1.5 flex items-center justify-between gap-2 text-xs">
-                  <div className="flex items-center gap-1.5 text-gray-400 font-medium flex-1 min-w-0 pr-2">
-                    <span className="text-sm sm:text-base font-bold text-white tracking-tight truncate shrink-0 max-w-[130px] sm:max-w-[200px]">
-                      {order.customerName || 'গ্রাহকের নাম নেই'}
-                    </span>
-                    <span className="text-gray-600 shrink-0">•</span>
-                    <span className="truncate block text-gray-300">
-                      {order.product || 'Golden Watch Combo'}
-                    </span>
-                    {order.variant && order.variant !== 'No Sellect' && (
-                      <span className="text-[10px] text-gray-500 hidden sm:inline-block">
-                        ({order.variant})
-                      </span>
+                  <div className="flex items-center gap-1.5 text-gray-400 font-medium flex-1 min-w-0 pr-1">
+                    {!isTodayTab && (
+                      <>
+                        <span className="text-sm sm:text-base font-bold text-white tracking-tight truncate shrink-0 max-w-[120px] sm:max-w-[180px]">
+                          {order.customerName || 'গ্রাহকের নাম নেই'}
+                        </span>
+                        <span className="text-gray-600 shrink-0">•</span>
+                      </>
                     )}
+                    
+                    {/* Column H (Variant) from Sheet */}
+                    <span
+                      className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-purple-950/70 text-purple-300 border border-purple-800/40 shrink-0 truncate max-w-[110px] sm:max-w-none font-semibold"
+                      title="H কলাম: ভ্যারিয়েন্ট / প্রোডাক্ট সিলেক্ট"
+                    >
+                      H: {order.variant || 'No Sellect'}
+                    </span>
+
+                    {/* Column I (Source) from Sheet */}
+                    <span
+                      className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-sky-950/70 text-sky-300 border border-sky-800/40 shrink-0 font-semibold"
+                      title="I কলাম: অর্ডার সোর্স"
+                    >
+                      I: {order.source || 'Website'}
+                    </span>
                   </div>
 
                   <div className="shrink-0 flex items-center gap-1.5">

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Search,
   SlidersHorizontal,
@@ -22,12 +22,72 @@ import {
   Loader2,
   Trash2,
   Calendar,
+  User,
 } from 'lucide-react';
-import { Order, OrderStatus } from '../types';
+import { Order, OrderStatus, Product, Sheet3ProductEntry } from '../types';
 import { updateOrderCardViaAppsScript, buildOrderCardPayload } from '../services/sheets';
+
+/**
+ * Matches an order's product or variant against the selected product filter
+ * Strictly for the 6 canonical products in Column H + All Products + No Sellect
+ */
+export const matchesProductFilter = (order: Order, filter: string): boolean => {
+  if (!filter || filter === 'ALL') return true;
+
+  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const vRaw = (order.variant || '').trim();
+  const vNorm = normalize(vRaw);
+
+  const isNoSellect =
+    !vRaw ||
+    vRaw === 'No Sellect' ||
+    vNorm === 'nosellect' ||
+    vNorm === 'noselect' ||
+    vRaw.toLowerCase().includes('no sellect');
+
+  if (filter === 'NO_SELLECT') {
+    return isNoSellect;
+  }
+
+  if (isNoSellect) {
+    return false;
+  }
+
+  const pNorm = normalize(filter);
+  const oNorm = normalize(order.product || '');
+
+  // Priority 1: Match with Column H (variant toggle)
+  if (vNorm && vNorm !== 'nosellect' && vNorm !== 'noselect') {
+    if (vNorm === pNorm) return true;
+    if (pNorm.includes('599') && !vNorm.includes('599')) return false;
+    if (pNorm.includes('990') && !vNorm.includes('990')) return false;
+    if (pNorm.includes('1350') && !vNorm.includes('1350')) return false;
+    if (vNorm.includes(pNorm) || pNorm.includes(vNorm)) return true;
+    if (pNorm.includes('watch') && (vNorm.includes('watch') || vNorm.includes('golden'))) return true;
+    if (pNorm.includes('rose') && vNorm.includes('rose') && !vNorm.includes('990') && !vNorm.includes('1350')) return true;
+    if (pNorm.includes('doll') && (vNorm.includes('doll') || vNorm.includes('toy'))) return true;
+    if (pNorm.includes('dispancer') && (vNorm.includes('dispan') || vNorm.includes('cutt') || vNorm.includes('disp'))) return true;
+  }
+
+  // Priority 2: Fallback to order.product only if Column H was not selected
+  if (oNorm && oNorm !== 'nosellect' && oNorm !== 'noselect') {
+    if (oNorm === pNorm) return true;
+    if (pNorm.includes('599') && !oNorm.includes('599') && !pNorm.includes('doll') && !pNorm.includes('dispancer')) return false;
+    if (pNorm.includes('990') && !oNorm.includes('990')) return false;
+    if (pNorm.includes('1350') && !oNorm.includes('1350')) return false;
+    if (pNorm.includes('doll') && (oNorm.includes('doll') || oNorm.includes('toy'))) return true;
+    if (pNorm.includes('dispancer') && (oNorm.includes('dispan') || oNorm.includes('cutt') || oNorm.includes('disp'))) return true;
+    if (pNorm.includes('watch') && (oNorm.includes('watch') || oNorm.includes('golden'))) return true;
+    if (pNorm.includes('rose') && oNorm.includes('rose') && !oNorm.includes('990') && !oNorm.includes('1350') && pNorm.includes('599')) return true;
+  }
+
+  return false;
+};
 
 export interface OrdersViewProps {
   orders: Order[];
+  products?: Product[];
+  sheet3Entries?: Sheet3ProductEntry[];
   onOpenNewOrder: () => void;
   onSyncSheet: () => void;
   isSyncing: boolean;
@@ -55,6 +115,8 @@ type DropdownType = 'variant' | 'source' | 'status';
 
 export const OrdersView: React.FC<OrdersViewProps> = ({
   orders,
+  products,
+  sheet3Entries,
   onOpenNewOrder,
   onSyncSheet,
   isSyncing,
@@ -70,6 +132,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [activeFilter, setActiveFilter] = useState<'All' | 'Processing' | 'Completed' | 'On hold' | 'Cancelled' | 'Pending'>('All');
+  const [selectedProductFilter, setSelectedProductFilter] = useState<string>('ALL');
+  const [isProductMenuOpen, setIsProductMenuOpen] = useState(false);
+  const productMenuRef = useRef<HTMLDivElement>(null);
 
   // Isolated dropdown state: only ONE dropdown on ONE card can be open at a time
   const [activeDropdown, setActiveDropdown] = useState<{
@@ -91,10 +156,13 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [editStatus, setEditStatus] = useState<OrderStatus>('Pending');
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
-  // Close dropdown when clicking outside
+  // Close dropdowns when clicking outside
   useEffect(() => {
-    const handleGlobalClick = () => {
+    const handleGlobalClick = (e: MouseEvent) => {
       setActiveDropdown(null);
+      if (productMenuRef.current && !productMenuRef.current.contains(e.target as Node)) {
+        setIsProductMenuOpen(false);
+      }
     };
     window.addEventListener('click', handleGlobalClick);
     return () => window.removeEventListener('click', handleGlobalClick);
@@ -302,41 +370,119 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     };
   };
 
-  // Filter orders
-  const filteredOrders = orders.filter((order) => {
-    const q = searchQuery.toLowerCase().trim();
-    if (q) {
-      const matchName = (order.customerName || '').toLowerCase().includes(q);
-      const matchPhone = (order.customerPhone || '').toLowerCase().includes(q);
-      const matchId = (order.id || '').toLowerCase().includes(q);
-      const matchProd = (order.product || '').toLowerCase().includes(q);
-      const matchVariant = (order.variant || '').toLowerCase().includes(q);
-      const matchAddr = (order.customerAddress || '').toLowerCase().includes(q);
-      if (!matchName && !matchPhone && !matchId && !matchProd && !matchVariant && !matchAddr) {
-        return false;
+  // Strictly the 6 products from Column H of Google Sheet + All Products + No Sellect
+  const productFilterTabs = useMemo(() => [
+    { id: 'ALL', label: 'All Products' },
+    { id: 'Rose 599tk', label: 'Rose 599tk' },
+    { id: 'Doll and toys', label: 'Doll and toys' },
+    { id: 'Watch 599tk', label: 'Watch 599tk' },
+    { id: 'Porbash Rose 990tk', label: 'Porbash Rose 990tk' },
+    { id: 'Porbash Rose 1350tk', label: 'Porbash Rose 1350tk' },
+    { id: 'Cutting Dispancer', label: 'Cutting Dispancer' },
+    { id: 'NO_SELLECT', label: 'No Sellect' },
+  ], []);
+
+  // Order counts per product
+  const productCounts = useMemo(() => {
+    const counts: Record<string, number> = {
+      ALL: orders.length,
+      'Rose 599tk': 0,
+      'Doll and toys': 0,
+      'Watch 599tk': 0,
+      'Porbash Rose 990tk': 0,
+      'Porbash Rose 1350tk': 0,
+      'Cutting Dispancer': 0,
+      NO_SELLECT: 0,
+    };
+
+    orders.forEach((order) => {
+      if (matchesProductFilter(order, 'NO_SELLECT')) {
+        counts.NO_SELLECT = (counts.NO_SELLECT || 0) + 1;
       }
-    }
+      productFilterTabs.forEach((tab) => {
+        if (tab.id !== 'ALL' && tab.id !== 'NO_SELLECT') {
+          if (matchesProductFilter(order, tab.id)) {
+            counts[tab.id] = (counts[tab.id] || 0) + 1;
+          }
+        }
+      });
+    });
 
-    const s = (order.status || '').toLowerCase();
-    if (activeFilter === 'Processing') {
-      return s.includes('proc');
-    }
-    if (activeFilter === 'Completed') {
-      return s.includes('comp') || s.includes('deliv');
-    }
-    if (activeFilter === 'On hold') {
-      return s.includes('hold');
-    }
-    if (activeFilter === 'Cancelled') {
-      return s.includes('cancel');
-    }
-    if (activeFilter === 'Pending') {
-      return s.includes('pend');
-    }
-    return true;
-  });
+    return counts;
+  }, [orders, productFilterTabs]);
 
-  // Column H (Variant) options - strictly Google Sheet products + No Sellect
+  // Status counts for tabs (scoped to selected product filter)
+  const filterCounts = useMemo(() => {
+    const scopedOrders =
+      selectedProductFilter === 'ALL'
+        ? orders
+        : orders.filter((o) => matchesProductFilter(o, selectedProductFilter));
+
+    const counts: Record<string, number> = {
+      All: scopedOrders.length,
+      Processing: 0,
+      Completed: 0,
+      'On hold': 0,
+      Cancelled: 0,
+      Pending: 0,
+    };
+    scopedOrders.forEach((o) => {
+      const s = (o.status || '').toLowerCase();
+      if (s.includes('proc') || s.includes('প্রসেসিং')) counts.Processing++;
+      else if (s.includes('comp') || s.includes('deliv') || s.includes('ডেলিভার্ড')) counts.Completed++;
+      else if (s.includes('hold') || s.includes('হোল্ড')) counts['On hold']++;
+      else if (s.includes('cancel') || s.includes('বাতিল') || s.includes('ক্যান্সেল')) counts.Cancelled++;
+      else if (s.includes('pend') || s.includes('পেন্ডিং')) counts.Pending++;
+    });
+    return counts;
+  }, [orders, selectedProductFilter]);
+
+  // Filter orders by selected product, search query, and order status
+  const filteredOrders = useMemo(() => {
+    return orders.filter((order) => {
+      // 1. Product Filter
+      if (selectedProductFilter !== 'ALL') {
+        if (!matchesProductFilter(order, selectedProductFilter)) {
+          return false;
+        }
+      }
+
+      // 2. Search Query
+      const q = searchQuery.toLowerCase().trim();
+      if (q) {
+        const matchName = (order.customerName || '').toLowerCase().includes(q);
+        const matchPhone = (order.customerPhone || '').toLowerCase().includes(q);
+        const matchId = (order.id || '').toLowerCase().includes(q);
+        const matchProd = (order.product || '').toLowerCase().includes(q);
+        const matchVariant = (order.variant || '').toLowerCase().includes(q);
+        const matchAddr = (order.customerAddress || '').toLowerCase().includes(q);
+        if (!matchName && !matchPhone && !matchId && !matchProd && !matchVariant && !matchAddr) {
+          return false;
+        }
+      }
+
+      // 3. Status Filter
+      const s = (order.status || '').toLowerCase();
+      if (activeFilter === 'Processing') {
+        return s.includes('proc');
+      }
+      if (activeFilter === 'Completed') {
+        return s.includes('comp') || s.includes('deliv');
+      }
+      if (activeFilter === 'On hold') {
+        return s.includes('hold');
+      }
+      if (activeFilter === 'Cancelled') {
+        return s.includes('cancel');
+      }
+      if (activeFilter === 'Pending') {
+        return s.includes('pend');
+      }
+      return true;
+    });
+  }, [orders, selectedProductFilter, searchQuery, activeFilter]);
+
+  // Column H (Variant) options - strictly Google Sheet Column H 6 products + No Sellect
   const availableVariants = [
     'No Sellect',
     'Rose 599tk',
@@ -345,7 +491,6 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     'Porbash Rose 990tk',
     'Porbash Rose 1350tk',
     'Cutting Dispancer',
-    'Golden Watch Combo',
   ];
 
   // Column I (Source) options - verified from Google Sheet
@@ -389,60 +534,66 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   };
 
   return (
-    <div className="space-y-3.5 animate-fadeIn pb-28 sm:pb-20 max-w-4xl mx-auto font-sans">
-      {/* WooCommerce Top Header */}
-      <div className="bg-[#141419] border-b border-[#24242c] -mx-3 sm:-mx-6 -mt-3 sm:-mt-6 px-4 sm:px-6 py-3.5 sticky top-0 z-20 shadow-md">
-        <div className="flex items-center justify-between">
-          <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
-            Orders
-          </h1>
+    <div className="space-y-3 sm:space-y-3.5 animate-fadeIn pb-28 sm:pb-20 max-w-4xl mx-auto font-sans">
+      {/* Top Header - Mobile Optimized */}
+      <div className="bg-[#141419] border-b border-[#24242c] -mx-3 sm:-mx-6 -mt-3 sm:-mt-6 px-3.5 sm:px-6 py-2.5 sm:py-3.5 sticky top-0 z-20 shadow-md">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <h1 className="text-lg sm:text-2xl font-bold text-white tracking-tight">
+              Orders
+            </h1>
+            <span className="text-xs px-2 py-0.5 rounded-full bg-[#1e202d] text-gray-400 font-mono border border-[#2b2d3d]">
+              {filteredOrders.length}
+            </span>
+          </div>
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-1.5 sm:gap-2.5">
             <button
               onClick={() => setIsSearchOpen(!isSearchOpen)}
-              className="p-1.5 text-gray-300 hover:text-white transition-colors cursor-pointer"
+              className="p-2 sm:p-1.5 rounded-lg bg-[#1a1b24] sm:bg-transparent text-gray-300 hover:text-white transition-colors cursor-pointer active:scale-95"
               title="Search orders"
             >
-              <Search className="w-5 h-5" />
+              <Search className="w-4 h-4 sm:w-5 sm:h-5" />
             </button>
             <button
               onClick={onSyncSheet}
               disabled={isSyncing}
-              className="p-1.5 text-gray-300 hover:text-white transition-colors cursor-pointer"
+              className="p-2 sm:p-1.5 rounded-lg bg-[#1a1b24] sm:bg-transparent text-gray-300 hover:text-white transition-colors cursor-pointer active:scale-95 disabled:opacity-50"
               title="Sync Google Sheet"
             >
               {isSyncing ? (
-                <RefreshCw className="w-5 h-5 text-purple-400 animate-spin" />
+                <RefreshCw className="w-4 h-4 sm:w-5 sm:h-5 text-purple-400 animate-spin" />
               ) : (
-                <RefreshCw className="w-5 h-5" />
+                <RefreshCw className="w-4 h-4 sm:w-5 sm:h-5" />
               )}
             </button>
             <button
               onClick={onOpenNewOrder}
-              className="flex items-center gap-1.5 px-3 py-1.5 sm:px-3.5 sm:py-2 rounded-lg bg-gradient-to-r from-pink-600 via-rose-600 to-pink-500 hover:from-pink-500 hover:to-rose-500 text-white text-xs sm:text-sm font-semibold shadow-md shadow-pink-600/30 transition-all active:scale-95 cursor-pointer"
+              className="flex items-center gap-1 sm:gap-1.5 px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-lg bg-gradient-to-r from-pink-600 via-rose-600 to-pink-500 hover:from-pink-500 hover:to-rose-500 text-white text-xs sm:text-sm font-semibold shadow-md shadow-pink-600/30 transition-all active:scale-95 cursor-pointer shrink-0"
             >
               <Plus className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-              <span>+ New Order</span>
+              <span className="hidden xs:inline">+ New Order</span>
+              <span className="xs:hidden">+ New</span>
             </button>
           </div>
         </div>
 
         {/* Collapsible Search Bar */}
         {isSearchOpen && (
-          <div className="mt-3 relative">
+          <div className="mt-2.5 relative animate-fadeIn">
             <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
-              placeholder="Search by #order, name, phone, product, variant..."
+              placeholder="Search by #order, name, phone, product..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               autoFocus
-              className="w-full bg-[#1b1b22] border border-[#2f2f3a] rounded-lg pl-9 pr-8 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-purple-500"
+              className="w-full bg-[#1b1b22] border border-[#2f2f3a] rounded-lg pl-9 pr-8 py-2 text-base sm:text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-purple-500 shadow-inner"
             />
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 hover:text-white cursor-pointer"
+                className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center text-xs text-gray-400 hover:text-white cursor-pointer"
               >
                 ✕
               </button>
@@ -450,56 +601,171 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           </div>
         )}
 
-        {/* Sub Header: Filter Label + Count */}
-        <div className="mt-2.5 flex items-center justify-between">
-          <div>
-            <div className="text-sm font-semibold text-gray-100 flex items-center gap-1.5">
-              <span>{activeFilter === 'All' ? 'All orders' : activeFilter}</span>
-              <span className="text-xs text-gray-400 font-mono">({filteredOrders.length})</span>
-            </div>
+        {/* Sub Header: Filter Label + Reset */}
+        <div className="mt-2 flex items-center justify-between">
+          <div className="text-xs font-semibold text-gray-300 flex items-center gap-1.5">
+            <span>{activeFilter === 'All' ? 'All orders' : activeFilter}</span>
+            {selectedProductFilter !== 'ALL' && (
+              <span className="text-purple-400 font-medium">
+                • {productFilterTabs.find((t) => t.id === selectedProductFilter)?.label || selectedProductFilter}
+              </span>
+            )}
+            <span className="text-gray-500 font-mono">({filteredOrders.length})</span>
           </div>
 
-          <div className="flex items-center gap-2">
+          {(activeFilter !== 'All' || selectedProductFilter !== 'ALL') && (
             <button
-              onClick={() => setActiveFilter('All')}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#202028] hover:bg-[#282834] text-xs font-medium text-gray-300 border border-[#323240] transition-colors cursor-pointer"
+              onClick={() => {
+                setActiveFilter('All');
+                setSelectedProductFilter('ALL');
+              }}
+              className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#202028] hover:bg-[#282834] text-[11px] font-medium text-gray-300 border border-[#323240] transition-colors cursor-pointer active:scale-95"
             >
-              <SlidersHorizontal className="w-3.5 h-3.5 text-gray-400" />
-              <span>Reset</span>
+              <SlidersHorizontal className="w-3 h-3 text-gray-400" />
+              <span>Reset all filters</span>
             </button>
-          </div>
+          )}
         </div>
 
-        {/* Top Status Tabs */}
-        <div className="mt-2.5 flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
+        {/* Product Filter Selector Bar - Only dropdown button populated strictly from sheet */}
+        <div className="mt-2 relative" ref={productMenuRef}>
+          <div className="flex items-center gap-2">
+            {/* Dropdown Toggle Button - Only this remains */}
+            <button
+              type="button"
+              id="product-filter-toggle-btn"
+              onClick={() => setIsProductMenuOpen(!isProductMenuOpen)}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#1a1b26] hover:bg-[#222436] border border-[#2d2f44] text-xs text-gray-200 transition-colors cursor-pointer active:scale-95 shadow-sm"
+              title="শিটের প্রোডাক্ট তালিকা"
+            >
+              <Package className="w-4 h-4 text-purple-400 shrink-0" />
+              <span className="font-semibold text-white truncate max-w-[200px] sm:max-w-xs">
+                {productFilterTabs.find((t) => t.id === selectedProductFilter)?.label ||
+                  (selectedProductFilter === 'ALL' ? 'All Products' : selectedProductFilter)}
+              </span>
+              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-[#27293d] text-purple-300 font-mono font-bold shrink-0">
+                {productCounts[selectedProductFilter] ?? orders.length}
+              </span>
+              <ChevronDown
+                className={`w-3.5 h-3.5 text-gray-400 transition-transform duration-200 shrink-0 ${
+                  isProductMenuOpen ? 'rotate-180' : ''
+                }`}
+              />
+            </button>
+
+            {/* Reset link if a product is selected */}
+            {selectedProductFilter !== 'ALL' && (
+              <button
+                type="button"
+                onClick={() => setSelectedProductFilter('ALL')}
+                className="flex items-center gap-1 text-[11px] font-semibold text-purple-400 hover:text-purple-300 px-2 py-1 rounded-lg bg-purple-950/40 hover:bg-purple-950/70 border border-purple-800/50 cursor-pointer active:scale-95"
+                title="সকল প্রোডাক্টে ফিরে যান"
+              >
+                <span>সব প্রোডাক্ট</span>
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+
+          {/* Expandable Product Dropdown Menu */}
+          {isProductMenuOpen && (
+            <div className="absolute left-0 top-full mt-1.5 z-40 w-72 sm:w-80 bg-[#171722] border border-[#2e3046] rounded-xl p-2 shadow-2xl animate-fadeIn">
+              <div className="text-[11px] text-gray-400 font-medium px-2 py-1 mb-1 flex items-center justify-between border-b border-[#252738]">
+                <span>শিটের প্রোডাক্ট তালিকা:</span>
+                <button
+                  type="button"
+                  onClick={() => setIsProductMenuOpen(false)}
+                  className="text-gray-400 hover:text-white p-0.5 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="space-y-1 max-h-60 overflow-y-auto pr-1">
+                {productFilterTabs.map((tab) => {
+                  const isSelected = selectedProductFilter === tab.id;
+                  const count = productCounts[tab.id] ?? 0;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedProductFilter(tab.id);
+                        setIsProductMenuOpen(false);
+                      }}
+                      className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-xs font-medium text-left transition-all cursor-pointer active:scale-98 ${
+                        isSelected
+                          ? 'bg-purple-900/60 text-white border border-purple-500 shadow-sm font-semibold'
+                          : 'bg-[#1e1f2c] text-gray-300 hover:bg-[#27283a] hover:text-white border border-transparent'
+                      }`}
+                    >
+                      <span className="truncate">{tab.label}</span>
+                      <span
+                        className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono shrink-0 ${
+                          isSelected ? 'bg-purple-700 text-white font-bold' : 'bg-[#2b2c3d] text-gray-400'
+                        }`}
+                      >
+                        {count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Top Status Tabs with Counter Badges - Swipeable on mobile */}
+        <div className="mt-2 flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none -mx-1 px-1">
           {(['All', 'Processing', 'Completed', 'On hold', 'Cancelled', 'Pending'] as const).map((filter) => {
             const isActive = activeFilter === filter;
+            const count = filterCounts[filter] || 0;
             return (
               <button
                 key={filter}
                 onClick={() => setActiveFilter(filter)}
-                className={`px-3 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-all cursor-pointer ${
+                className={`px-2.5 py-1 sm:px-3 sm:py-1 rounded-lg text-xs font-medium whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 shrink-0 active:scale-95 ${
                   isActive
-                    ? 'bg-[#152e35] text-[#7de3e0] border border-[#235863] shadow-sm'
-                    : 'bg-[#1c1c24] text-gray-400 hover:text-gray-200 border border-transparent'
+                    ? 'bg-[#152e35] text-[#7de3e0] border border-[#235863] shadow-sm font-semibold'
+                    : 'bg-[#1c1c24] text-gray-400 hover:text-gray-200 border border-[#272733]'
                 }`}
               >
-                {filter}
+                <span>{filter}</span>
+                <span
+                  className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                    isActive ? 'bg-[#235863]/60 text-[#7de3e0] font-bold' : 'bg-[#252533] text-gray-400'
+                  }`}
+                >
+                  {count}
+                </span>
               </button>
             );
           })}
         </div>
       </div>
 
-      {/* Orders List: Feature-complete, interactive cards */}
-      <div className="space-y-2 sm:space-y-3">
+      {/* Orders List: Well-proportioned, comfortably readable cards */}
+      <div className="space-y-2 sm:space-y-2.5">
         {filteredOrders.length === 0 ? (
-          <div className="py-16 px-4 text-center bg-[#141418] rounded-xl border border-[#23242c]">
+          <div className="py-12 sm:py-16 px-4 text-center bg-[#141418] rounded-xl border border-[#23242c]">
             <Package className="w-10 h-10 text-gray-600 mx-auto mb-2" />
             <p className="text-sm font-semibold text-gray-300">কোনো অর্ডার পাওয়া যায়নি</p>
             <p className="text-xs text-gray-500 mt-1">
-              {searchQuery ? 'ভিন্ন শব্দ দিয়ে খুঁজুন' : 'নতুন অর্ডার তৈরি করতে উপরে চাপুন'}
+              {selectedProductFilter !== 'ALL'
+                ? `"${productFilterTabs.find((t) => t.id === selectedProductFilter)?.label || selectedProductFilter}" এর কোনো অর্ডার নেই`
+                : searchQuery
+                ? 'ভিন্ন শব্দ দিয়ে খুঁজুন'
+                : 'নতুন অর্ডার তৈরি করতে উপরে চাপুন'}
             </p>
+            {selectedProductFilter !== 'ALL' && (
+              <button
+                type="button"
+                onClick={() => setSelectedProductFilter('ALL')}
+                className="mt-3 px-3 py-1.5 rounded-lg bg-purple-900/40 hover:bg-purple-900/60 border border-purple-700/50 text-purple-200 text-xs font-medium inline-flex items-center gap-1.5 cursor-pointer active:scale-95"
+              >
+                <Package className="w-3.5 h-3.5" />
+                <span>সকল প্রোডাক্টের অর্ডার দেখুন</span>
+              </button>
+            )}
           </div>
         ) : (
           filteredOrders.map((order, index) => {
@@ -511,85 +777,56 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               <div
                 key={orderKey}
                 onClick={() => onSelectOrder(order)}
-                className="bg-[#141419] hover:bg-[#181822] active:bg-[#1c1c28] border border-[#232430] hover:border-[#383a4c] rounded-xl p-3 sm:px-4 sm:py-3 shadow-xs transition-all cursor-pointer select-none group relative"
+                className={`bg-[#141419] hover:bg-[#181822] active:bg-[#1c1c28] border border-[#232430] hover:border-[#383a4c] rounded-xl p-3 sm:px-4 sm:py-3 shadow-xs transition-all cursor-pointer select-none relative ${
+                  activeDropdown?.orderKey === orderKey ? 'z-30' : 'z-0'
+                }`}
               >
-                {/* Line 1: Order ID, Row #, Date, Tracking (K), Courier (L), Pen (Edit) Icon, and Status Dropdown (Col J) */}
+                {/* Line 1: Name & Date (Left) | Edit Pen & Order Status Change Dropdown (Right) */}
                 <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0 flex-1 flex-wrap">
-                    <span className="text-xs font-mono font-bold text-gray-400 group-hover:text-purple-400 shrink-0">
-                      {order.id.startsWith('#') ? order.id : `#${order.id}`}
-                    </span>
-                    {order.rowIndex && (
-                      <span className="text-[10px] text-gray-500 font-mono bg-[#1b1c24] px-1.5 py-0.5 rounded border border-[#262835] shrink-0">
-                        Row #{order.rowIndex}
-                      </span>
-                    )}
+                  <div className="min-w-0 flex-1">
                     {order.date && (
-                      <span className="text-[10px] text-gray-500 flex items-center gap-1 shrink-0">
-                        <Calendar className="w-2.5 h-2.5" />
+                      <span className="text-[10px] text-gray-500/70 font-mono block leading-none mb-0.5 select-none">
                         {order.date}
                       </span>
                     )}
+                    <span className="font-bold text-gray-100 text-sm sm:text-base truncate block">
+                      {order.customerName || 'নামবিহীন'}
+                    </span>
                   </div>
 
-                  {/* Actions on Top Right: Tracking (K), Courier (L), Pen / Edit Icon + Status Dropdown (Col J) */}
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {/* Tracking Code Badge (Column K) */}
-                    {order.trackingCode && (
-                      <button
-                        type="button"
-                        onClick={(e) => handleCopyTracking(e, order.trackingCode!)}
-                        className="px-2 py-0.5 rounded bg-[#101b2e] hover:bg-[#16253f] border border-blue-800/40 text-cyan-300 font-mono text-[10px] flex items-center gap-1 cursor-pointer"
-                        title="ট্র্যাকিং কোড কপি করুন"
-                      >
-                        <span>K: {order.trackingCode}</span>
-                        {copiedTracking === order.trackingCode ? (
-                          <Check className="w-2.5 h-2.5 text-emerald-400" />
-                        ) : (
-                          <Copy className="w-2.5 h-2.5 text-gray-400" />
-                        )}
-                      </button>
-                    )}
-
-                    {/* Courier Status (Column L) */}
-                    {order.courierStatus && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-950/70 text-purple-300 border border-purple-800/40 font-mono shrink-0">
-                        L: {order.courierStatus}
-                      </span>
-                    )}
-
-                    {/* Quick Edit Pen Icon Button */}
+                  {/* Actions on Right: Quick Edit Pen + Order Status Change Dropdown */}
+                  <div className="flex items-center gap-1.5 sm:gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+                    {/* Quick Edit Pen Button */}
                     <button
                       type="button"
                       onClick={(e) => openEditModal(e, order)}
-                      className="p-1.5 rounded-lg bg-[#1e2230] hover:bg-[#282e42] text-pink-400 hover:text-pink-300 border border-[#2b334a] transition-all flex items-center justify-center cursor-pointer"
-                      title="অর্ডার এডিট করুন (নাম, ফোন, ঠিকানা, কোয়ান্টিটি, ভ্যারিয়েন্ট)"
+                      className="p-1.5 rounded-lg bg-[#1e2230] hover:bg-[#282e42] active:scale-95 text-pink-400 hover:text-pink-300 border border-[#2b334a] transition-all flex items-center justify-center cursor-pointer"
+                      title="অর্ডার এডিট করুন"
                     >
-                      <Edit3 className="w-3.5 h-3.5" />
+                      <Edit3 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                     </button>
 
-                    {/* Status Dropdown Button (Column J) */}
+                    {/* Order Status Change Dropdown */}
                     <div className="relative">
                       <button
                         type="button"
                         onClick={(e) => toggleDropdown(e, orderKey, 'status')}
-                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold border transition-all cursor-pointer ${statusStyle.badge}`}
-                        title="J: অর্ডার স্ট্যাটাস পরিবর্তন করুন"
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold border transition-all cursor-pointer active:scale-95 ${statusStyle.badge}`}
+                        title="অর্ডার স্ট্যাটাস পরিবর্তন করুন"
                       >
                         <span className={`w-1.5 h-1.5 rounded-full ${statusStyle.dot}`} />
-                        <span className="text-[10px] opacity-75 font-bold">J:</span>
-                        <span>{statusStyle.label}</span>
-                        <ChevronDown className="w-3 h-3 opacity-70 ml-0.5 shrink-0" />
+                        <span className="truncate max-w-[85px] sm:max-w-none">{statusStyle.label}</span>
+                        <ChevronDown className="w-3 h-3 opacity-70 shrink-0" />
                       </button>
 
                       {/* Dropdown Menu for Status */}
                       {activeDropdown?.orderKey === orderKey && activeDropdown?.type === 'status' && (
                         <div
                           onClick={(e) => e.stopPropagation()}
-                          className="absolute right-0 top-full mt-1 w-44 max-h-60 overflow-y-auto bg-[#181822] border border-[#2f2f40] rounded-xl shadow-2xl py-1.5 z-50 animate-fadeIn"
+                          className="absolute right-0 top-full mt-1 w-44 max-h-56 overflow-y-auto bg-[#181822] border border-[#2f2f40] rounded-xl shadow-2xl py-1 z-50 animate-fadeIn"
                         >
-                          <div className="px-3 py-1 text-[10px] text-gray-400 font-semibold border-b border-[#252535] sticky top-0 bg-[#181822] z-10">
-                            J: স্ট্যাটাস সিলেক্ট করুন
+                          <div className="px-3 py-1 text-[11px] text-gray-400 font-semibold border-b border-[#252535] sticky top-0 bg-[#181822] z-10">
+                            স্ট্যাটাস পরিবর্তন করুন
                           </div>
                           {availableStatuses.map((st) => (
                             <button
@@ -614,19 +851,16 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   </div>
                 </div>
 
-                {/* Line 2: Product Name on Left, Price on Right */}
-                <div className="mt-1.5 flex items-center justify-between gap-2 text-xs">
-                  <div className="flex items-center gap-1.5 text-gray-300 font-medium flex-1 min-w-0 pr-2">
-                    <span className="truncate block text-gray-300">
-                      {order.product || 'Golden Watch Combo'}
+                {/* Line 2: Column E Product Name (Left) | Price (Right) */}
+                <div className="mt-1.5 flex items-center justify-between gap-2">
+                  <div className="text-gray-300 text-xs sm:text-sm font-medium truncate flex-1 min-w-0 pr-2">
+                    <span className="truncate block">
+                      {order.product || 'প্রোডাক্ট নেই'}
                     </span>
                   </div>
 
-                  <div className="shrink-0 flex items-center gap-1.5">
-                    <span className="text-xs sm:text-sm font-bold font-mono text-emerald-400 tracking-tight">
-                      {displayAmount}.00 BDT
-                    </span>
-                    <ChevronRight className="w-3.5 h-3.5 text-gray-600 group-hover:text-gray-400 transition-colors shrink-0" />
+                  <div className="shrink-0 flex items-center gap-1 font-mono font-bold text-emerald-400 text-sm sm:text-base tracking-tight">
+                    <span>{displayAmount}.00 BDT</span>
                   </div>
                 </div>
               </div>
@@ -642,13 +876,13 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           onClick={() => setEditingOrder(null)}
         >
           <div
-            className="bg-[#14151e] border border-[#2c3044] rounded-2xl w-full max-w-lg shadow-2xl p-4 sm:p-6 space-y-4 my-auto animate-fadeIn"
+            className="bg-[#14151e] border border-[#2c3044] rounded-2xl w-full max-w-lg shadow-2xl p-4 sm:p-6 space-y-4 my-auto max-h-[92vh] overflow-y-auto animate-fadeIn"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between pb-3 border-b border-[#232636]">
+            <div className="flex items-center justify-between pb-3 border-b border-[#232636] sticky -top-4 bg-[#14151e] z-10 -mt-1 pt-1">
               <div>
                 <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
-                  <Edit3 className="w-5 h-5 text-pink-400" />
+                  <Edit3 className="w-4 h-4 sm:w-5 sm:h-5 text-pink-400" />
                   অর্ডার এডিট করুন (শিটে সেভ হবে)
                 </h2>
                 <p className="text-xs text-gray-400 mt-0.5">
@@ -658,7 +892,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               <button
                 type="button"
                 onClick={() => setEditingOrder(null)}
-                className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-[#202434] transition-colors cursor-pointer"
+                className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-[#202434] transition-colors cursor-pointer active:scale-95"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -676,7 +910,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   onChange={(e) => setEditName(e.target.value)}
                   placeholder="গ্রাহকের নাম লিখুন"
                   required
-                  className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-pink-500"
+                  className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-base sm:text-sm text-white focus:outline-none focus:border-pink-500"
                 />
               </div>
 
@@ -691,7 +925,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   onChange={(e) => setEditPhone(e.target.value)}
                   placeholder="01XXXXXXXXX"
                   required
-                  className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-pink-500 font-mono"
+                  className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-base sm:text-sm text-white focus:outline-none focus:border-pink-500 font-mono"
                 />
               </div>
 
@@ -706,7 +940,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   placeholder="সম্পূর্ণ ডেলিভারি ঠিকানা..."
                   rows={2}
                   required
-                  className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-pink-500 resize-none"
+                  className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-base sm:text-sm text-white focus:outline-none focus:border-pink-500 resize-none"
                 />
               </div>
 
@@ -721,7 +955,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     value={editPrice}
                     onChange={(e) => setEditPrice(Number(e.target.value))}
                     min={0}
-                    className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-pink-500 font-mono font-bold"
+                    className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-base sm:text-sm text-white focus:outline-none focus:border-pink-500 font-mono font-bold"
                   />
                 </div>
 
@@ -734,7 +968,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     value={editQuantity}
                     onChange={(e) => setEditQuantity(Math.max(1, Number(e.target.value)))}
                     min={1}
-                    className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-pink-500 font-mono font-bold"
+                    className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-base sm:text-sm text-white focus:outline-none focus:border-pink-500 font-mono font-bold"
                   />
                 </div>
               </div>
@@ -748,7 +982,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   <select
                     value={editVariant}
                     onChange={(e) => setEditVariant(e.target.value)}
-                    className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-pink-500"
+                    className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-base sm:text-sm text-white focus:outline-none focus:border-pink-500"
                   >
                     {availableVariants.map((v) => (
                       <option key={v} value={v}>
@@ -765,7 +999,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   <select
                     value={editSource}
                     onChange={(e) => setEditSource(e.target.value)}
-                    className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-pink-500"
+                    className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-base sm:text-sm text-white focus:outline-none focus:border-pink-500"
                   >
                     {availableSources.map((src) => (
                       <option key={src} value={src}>
@@ -784,7 +1018,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 <select
                   value={editStatus}
                   onChange={(e) => setEditStatus(e.target.value as OrderStatus)}
-                  className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-pink-500 font-semibold"
+                  className="w-full bg-[#1b1e2c] border border-[#2f354e] rounded-lg px-3 py-2 text-base sm:text-sm text-white focus:outline-none focus:border-pink-500 font-semibold"
                 >
                   {availableStatuses.map((st) => (
                     <option key={st} value={st}>
@@ -795,7 +1029,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               </div>
 
               {/* Footer Buttons */}
-              <div className="flex items-center justify-between gap-3 pt-3 border-t border-[#232636]">
+              <div className="flex items-center justify-between gap-2 pt-3 border-t border-[#232636]">
                 {onDeleteOrder && (
                   <button
                     type="button"
@@ -805,10 +1039,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                         setEditingOrder(null);
                       }
                     }}
-                    className="px-3 py-2 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/40 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                    className="px-2.5 sm:px-3 py-2 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/40 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer active:scale-95"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    <span>ডিলিট</span>
+                    <span className="hidden xs:inline">ডিলিট</span>
                   </button>
                 )}
 
@@ -816,24 +1050,24 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   <button
                     type="button"
                     onClick={() => setEditingOrder(null)}
-                    className="px-4 py-2 rounded-lg bg-[#202434] hover:bg-[#2a3044] text-gray-300 text-xs font-semibold transition-colors cursor-pointer"
+                    className="px-3.5 sm:px-4 py-2 rounded-lg bg-[#202434] hover:bg-[#2a3044] text-gray-300 text-xs font-semibold transition-colors cursor-pointer active:scale-95"
                   >
                     বাতিল
                   </button>
                   <button
                     type="submit"
                     disabled={isSavingEdit}
-                    className="px-5 py-2 rounded-lg bg-gradient-to-r from-pink-600 via-rose-600 to-pink-500 hover:from-pink-500 hover:to-rose-500 text-white text-xs font-bold shadow-lg shadow-pink-600/30 flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50"
+                    className="px-4 sm:px-5 py-2 rounded-lg bg-gradient-to-r from-pink-600 via-rose-600 to-pink-500 hover:from-pink-500 hover:to-rose-500 text-white text-xs font-bold shadow-lg shadow-pink-600/30 flex items-center gap-1.5 sm:gap-2 transition-all cursor-pointer disabled:opacity-50 active:scale-95"
                   >
                     {isSavingEdit ? (
                       <>
                         <Loader2 className="w-4 h-4 animate-spin" />
-                        <span>শিটে সেভ হচ্ছে...</span>
+                        <span>সেভ হচ্ছে...</span>
                       </>
                     ) : (
                       <>
                         <Send className="w-4 h-4" />
-                        <span>গুগল শিটে সেভ করুন</span>
+                        <span>শিটে সেভ করুন</span>
                       </>
                     )}
                   </button>

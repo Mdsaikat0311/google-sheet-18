@@ -1795,19 +1795,28 @@ export const updateSheetSteadfastActionBatch = async (
     }
   }
 
-  // Fallback: update in parallel / sequence
-  const results = await Promise.allSettled(
-    updates.map((u) =>
-      updateSheetSteadfastAction(
-        spreadsheetId,
-        accessToken,
-        cleanTab,
-        u.rowIndex,
-        u.action,
-        u.orderId
+  // Fallback: update sequentially or in small throttled batches to avoid overwhelming Apps Script / CORS limits
+  const results = [];
+  const chunkSize = 3;
+  for (let i = 0; i < updates.length; i += chunkSize) {
+    const chunk = updates.slice(i, i + chunkSize);
+    const chunkResults = await Promise.allSettled(
+      chunk.map((u) =>
+        updateSheetSteadfastAction(
+          spreadsheetId,
+          accessToken,
+          cleanTab,
+          u.rowIndex,
+          u.action,
+          u.orderId
+        )
       )
-    )
-  );
+    );
+    results.push(...chunkResults);
+    if (i + chunkSize < updates.length) {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    }
+  }
   return results;
 };
 

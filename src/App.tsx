@@ -186,6 +186,8 @@ export default function App() {
 
   // Track recent local updates so sync does not overwrite newly edited values
   const recentUpdatesRef = useRef<Map<string, { time: number; data: Partial<Order> }>>(new Map());
+  const isSyncingInProgressRef = useRef<boolean>(false);
+  const isRefreshingSheet3Ref = useRef<boolean>(false);
 
   // Modals state
   const [isNewOrderOpen, setIsNewOrderOpen] = useState(false);
@@ -201,6 +203,8 @@ export default function App() {
 
   // Fetch Sheet 3 live stock & row entries in real time
   const loadSheet3StockLive = async (targetSpreadsheetId: string = spreadsheetId) => {
+    if (isRefreshingSheet3Ref.current) return;
+    isRefreshingSheet3Ref.current = true;
     setIsRefreshingSheet3(true);
     try {
       const cleanId = extractSpreadsheetId(targetSpreadsheetId);
@@ -289,6 +293,7 @@ export default function App() {
       console.warn('Sheet 3 live stock sync error:', e);
     } finally {
       setIsRefreshingSheet3(false);
+      isRefreshingSheet3Ref.current = false;
     }
   };
 
@@ -335,14 +340,14 @@ export default function App() {
     }
   };
 
-  // Real-time listener for Sheet 3 & Orders (Fast polling + Window Focus + Tab Visibility refresh)
+  // Real-time listener for Sheet 3 & Orders (Polling every 15s + Window Focus + Tab Visibility refresh)
   useEffect(() => {
     loadSheet3StockLive(spreadsheetId);
     syncWithSheet(spreadsheetId, accessToken, orderSheetTab, true);
     const interval = setInterval(() => {
       loadSheet3StockLive(spreadsheetId);
       syncWithSheet(spreadsheetId, accessToken, orderSheetTab, true);
-    }, 6000);
+    }, 15000);
 
     const onFocus = () => {
       loadSheet3StockLive(spreadsheetId);
@@ -366,7 +371,6 @@ export default function App() {
 
   // 1. Initialize Firebase Auth
   useEffect(() => {
-    loadSheet3StockLive(spreadsheetId);
     const unsubscribe = initAuth(
       (currentUser, token) => {
         setUser(currentUser);
@@ -375,15 +379,11 @@ export default function App() {
         if (token) {
           syncWithSheet(spreadsheetId, token, orderSheetTab);
         }
-        loadSheet3StockLive(spreadsheetId);
       },
       () => {
         setUser(null);
         setToken(null);
         setAccessToken(null);
-        // Automatically fetch public live orders if not logged in
-        syncWithSheet(spreadsheetId, null, orderSheetTab);
-        loadSheet3StockLive(spreadsheetId);
       }
     );
     return () => unsubscribe();
@@ -396,11 +396,11 @@ export default function App() {
     targetTab: string = orderSheetTab,
     silent: boolean = false
   ) => {
+    if (isSyncingInProgressRef.current) return;
+    isSyncingInProgressRef.current = true;
     if (!silent) setIsSyncing(true);
     try {
       const cleanId = extractSpreadsheetId(targetSpreadsheetId);
-      // Live sync Sheet 3 stock in parallel
-      loadSheet3StockLive(cleanId);
       const sheetResult = await getSheetOrders(cleanId, targetToken || undefined, targetTab);
 
       if (sheetResult.orders && sheetResult.orders.length > 0) {
@@ -452,6 +452,7 @@ export default function App() {
       }
     } finally {
       if (!silent) setIsSyncing(false);
+      isSyncingInProgressRef.current = false;
     }
   };
 
@@ -753,6 +754,14 @@ export default function App() {
   const handleBatchSendToSteadfast = async (ordersToSend: Order[]): Promise<void> => {
     if (!ordersToSend || ordersToSend.length === 0) return;
 
+    const now = Date.now();
+    ordersToSend.forEach((o) => {
+      recentUpdatesRef.current.set(o.id, {
+        time: now,
+        data: { steadfastStatus: 'send to steadfast' },
+      });
+    });
+
     const orderIds = new Set(ordersToSend.map((o) => o.id));
     setOrders((prev) =>
       prev.map((o) =>
@@ -769,7 +778,9 @@ export default function App() {
     showToast(`⚡ ${ordersToSend.length}টি অর্ডার গুগল শিটের M কলামে 'send to steadfast' পাঠানো হচ্ছে...`);
 
     // Dispatch webhook for Steadfast dispatch (Single Object if 1 order, Bulk Array if >1 orders)
-    sendSteadfastOrdersViaAppsScript(ordersToSend, 'Send to Steadfast');
+    sendSteadfastOrdersViaAppsScript(ordersToSend, 'Send to Steadfast').catch((e) => {
+      console.warn('Apps script steadfast webhook notice:', e);
+    });
 
     const updates = ordersToSend.map((o) => ({
       rowIndex: resolveRowIndex(o),
@@ -784,32 +795,18 @@ export default function App() {
         orderSheetTab,
         updates
       );
-      showToast(`✅ ${ordersToSend.length}টি অর্ডার শিটের M কলামে 'send to steadfast' আপডেট হয়েছে! K ও L চেক হচ্ছে...`, 'success');
+      showToast(`✅ ${ordersToSend.length}টি অর্ডার শিটের M কলামে 'send to steadfast' আপডেট হয়েছে!`, 'success');
     } catch (err) {
-      console.error('Batch send error, attempting sequential fallback:', err);
-      // Sequential fallback
-      for (const o of ordersToSend) {
-        try {
-          await updateSheetSteadfastAction(
-            spreadsheetId,
-            accessToken,
-            orderSheetTab,
-            resolveRowIndex(o),
-            'send to steadfast',
-            o.id
-          );
-        } catch (e) {}
-      }
+      console.warn('Batch send notice:', err);
     }
 
-    // Real-time check with Google Sheet: immediate, +2.5s, +5s
-    syncWithSheet(spreadsheetId, accessToken, orderSheetTab, true);
+    // Real-time check with Google Sheet: +3s, +6s
     setTimeout(() => {
       syncWithSheet(spreadsheetId, accessToken, orderSheetTab, true);
-    }, 2500);
+    }, 3000);
     setTimeout(() => {
       syncWithSheet(spreadsheetId, accessToken, orderSheetTab, true);
-    }, 5500);
+    }, 6000);
   };
 
   // 5. Update Order Quantity in Column N (isolated per-order)
@@ -1284,6 +1281,8 @@ export default function App() {
           {activeTab === 'orders' && (
             <OrdersView
               orders={orders}
+              products={products}
+              sheet3Entries={sheet3Entries}
               onOpenNewOrder={() => setIsNewOrderOpen(true)}
               onSyncSheet={() => syncWithSheet()}
               isSyncing={isSyncing}
@@ -1305,7 +1304,9 @@ export default function App() {
               products={products}
               onToggleSteadfast={handleToggleSteadfast}
               onBatchSendToSteadfast={handleBatchSendToSteadfast}
-              onSyncSheet={(silent = false) => syncWithSheet(spreadsheetId, accessToken, orderSheetTab, silent)}
+              onSyncSheet={(silent = false) => {
+                syncWithSheet(spreadsheetId, accessToken, orderSheetTab, silent);
+              }}
               isSyncing={isSyncing}
               onSelectOrder={(order) => setSelectedOrderForView(order)}
               spreadsheetId={spreadsheetId}
@@ -1403,15 +1404,6 @@ export default function App() {
         >
           <BarChart3 className="w-5 h-5" />
           <span className="text-[10px]">Analytics</span>
-        </button>
-
-        {/* Tab 5: Sheet */}
-        <button
-          onClick={() => setIsSheetSettingsOpen(true)}
-          className="flex flex-col items-center gap-1 text-gray-400 hover:text-gray-200 transition-all"
-        >
-          <FileSpreadsheet className="w-5 h-5" />
-          <span className="text-[10px]">Sheet</span>
         </button>
       </nav>
 
